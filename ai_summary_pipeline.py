@@ -683,6 +683,18 @@ Output format: {{ "revised_sentence": "your fixed sentence here" }}
             # Load Excel blueprint using pandas (handles locked/open sheets better on Windows)
             # and convert to Polars.
             pd_blueprint = pd.read_excel(blueprint_path, sheet_name=sheet_name)
+            
+            # Ensure all column names are strings
+            pd_blueprint.columns = [str(col).strip() for col in pd_blueprint.columns]
+            
+            # Clean and stringify all cell values to prevent mixed-type Arrow conversion errors
+            # (e.g., float years like 2022.0 are formatted cleanly as "2022", and nulls become empty strings)
+            for col in pd_blueprint.columns:
+                pd_blueprint[col] = pd_blueprint[col].apply(
+                    lambda x: str(int(x)) if isinstance(x, float) and x.is_integer() 
+                    else ("" if pd.isna(x) else str(x).strip())
+                )
+                
             df_blueprint = pl.from_pandas(pd_blueprint)
         except Exception as e:
             print(f"Failed to load Excel blueprint sheet '{sheet_name}'. Error: {e}")
