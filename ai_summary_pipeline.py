@@ -288,7 +288,12 @@ class AISummaryPipeline:
                 p_str = self.format_value(p_val, metric_name, m_type)
                 diff = f - p_val
                 
-                peer_obj = {"name": p["Name"], "val": p_val, "str": p_str, "abs_diff": abs(diff)}
+                # Store formatted difference alongside each peer object
+                if is_percentage:
+                    diff_str = f"{abs(diff):.1f} pp"
+                else:
+                    diff_str = self.format_value(abs(diff), metric_name, m_type)
+                peer_obj = {"name": p["Name"], "val": p_val, "str": p_str, "abs_diff": abs(diff), "diff_str": diff_str}
                 debug_math += f"[{p['Name']} ({p_val:,.4f}): "
                 
                 if abs(diff) <= tolerance:
@@ -296,10 +301,10 @@ class AISummaryPipeline:
                     debug_math += "SIM] "
                 elif diff > 0:
                     higher_than.append(peer_obj)
-                    debug_math += "Focus>Peer] "
+                    debug_math += f"Focus>Peer by {diff_str}] "
                 else:
                     lower_than.append(peer_obj)
-                    debug_math += "Focus<Peer] "
+                    debug_math += f"Focus<Peer by {diff_str}] "
                     
             higher_than.sort(key=lambda x: x["abs_diff"], reverse=True)
             lower_than.sort(key=lambda x: x["abs_diff"], reverse=True)
@@ -316,22 +321,25 @@ class AISummaryPipeline:
             if peer_avg_raw is not None:
                 p_avg = float(peer_avg_raw)
                 p_avg_str = self.format_value(p_avg, metric_name, m_type)
+                avg_diff = f - p_avg
+                avg_diff_str = f"{abs(avg_diff):.1f} pp" if is_percentage else self.format_value(abs(avg_diff), metric_name, m_type)
                 debug_math += f"| Peer Avg: {p_avg:,.4f} "
                 if abs(f - p_avg) <= tolerance:
                     draft += f"nearly the same as its peer average of {p_avg_str}. "
                     debug_math += "-> Eval: Avg Similar."
                 elif f > p_avg:
-                    draft += f"{word_high} than its peer average of {p_avg_str}. "
-                    debug_math += f"-> Eval: Avg {word_high.capitalize()}."
+                    draft += f"{word_high} than its peer average of {p_avg_str} (by {avg_diff_str}). "
+                    debug_math += f"-> Eval: Avg {word_high.capitalize()} by {avg_diff_str}."
                 else:
-                    draft += f"{word_low} than its peer average of {p_avg_str}. "
-                    debug_math += f"-> Eval: Avg {word_low.capitalize()}."
+                    draft += f"{word_low} than its peer average of {p_avg_str} (by {avg_diff_str}). "
+                    debug_math += f"-> Eval: Avg {word_low.capitalize()} by {avg_diff_str}."
             else:
                 draft += f"evaluated against individual peers. "
 
             def fmt_list(lst):
+                """Format list with name, value, and delta."""
                 if not lst: return ""
-                names = [f"{x['name']} ({x['str']})" for x in lst]
+                names = [f"{x['name']} ({x['str']}, diff: {x['diff_str']})" for x in lst]
                 if len(names) > 5: return ", ".join(names[:5]) + f", and {len(names)-5} others"
                 if len(names) == 1: return names[0]
                 if len(names) == 2: return f"{names[0]} and {names[1]}"
@@ -631,30 +639,44 @@ class AISummaryPipeline:
         return text
 
     def apply_grammar_layer(self, text: str) -> str:
-        if text in ["N/A", "JSON Error", "JSON Parse Error", "JSON Format Error", ""] or str(text).startswith("Error:"): return text
-        p = f"""You are a strict copyeditor. Fix capitalization and grammar in the sentence below.
-CRITICAL RULES:
-1. Demographic categories, age groups, and drivers of change MUST be lowercase unless they start a sentence.
-2. Geographic locations MUST be fully capitalized (e.g., 'Texas', 'Austin MSA'). Do NOT lowercase them.
-3. Output STRICTLY as a valid JSON object. Do not include intro text.
-
-Original Sentence: {text}
-Output format: {{ "revised_sentence": "your fixed sentence here" }}
-"""
-        return self.generate_text(p, as_json=True, json_key="revised_sentence")
+        """Kept for backward compatibility; delegates to apply_capitalization_layer with no geo list."""
+        return self.apply_capitalization_layer(text, [])
 
     def apply_geography_standardization_layer(self, text: str, valid_geos: list) -> str:
-        if text in ["N/A", "JSON Error", "JSON Parse Error", "JSON Format Error", ""] or str(text).startswith("Error:"): return text
-        valid_geos_clean = list(set([g.replace("Peers (Average)", "its peer average").replace("Peers (Combined)", "its combined peers") for g in valid_geos if g]))
-        geo_str = ", ".join([f"'{g}'" for g in valid_geos_clean])
-        p = f"""You are a strict copyeditor. Ensure the geography names in the sentence EXACTLY match the provided allowed list.
-CRITICAL RULES:
-1. Valid geography names are EXACTLY: {geo_str}.
-2. Replace any ALL-CAPS names with their proper Title Case format.
-3. Output STRICTLY as a valid JSON object. Do not include intro text.
+        """Kept for backward compatibility; delegates to apply_capitalization_layer."""
+        return self.apply_capitalization_layer(text, valid_geos)
+
+    def apply_capitalization_layer(self, text: str, valid_geos: list) -> str:
+        """Single unified pass: fix grammar/capitalization AND geography name casing in one LLM call."""
+        if text in ["N/A", "JSON Error", "JSON Parse Error", "JSON Format Error", ""] or str(text).startswith("Error:"):
+            return text
+        
+        valid_geos_clean = list(set([
+            g.replace("Peers (Average)", "its peer average").replace("Peers (Combined)", "its combined peers")
+            for g in valid_geos if g
+        ]))
+        geo_str = ", ".join([f'"{g}"' for g in valid_geos_clean]) if valid_geos_clean else "none provided"
+        
+        p = f"""You are a strict copyeditor. Apply the following rules to the sentence below and output only the corrected sentence.
+
+RULES (apply ALL of them):
+1. GEOGRAPHY CASING - use Title Case for all place names:
+   - Every word in a city, county, region, or state name gets a capital first letter.
+   - Examples of correct format: "Fife, WA" not "FIFE, WA"; "Pierce County" not "PIERCE COUNTY";
+     "Seattle MSA" not "SEATTLE MSA"; "Puget Sound Region" not "PUGET SOUND REGION";
+     "Washington" not "WASHINGTON"; "United States" not "UNITED STATES".
+   - Authoritative list of valid geography names for this sentence: {geo_str}.
+   - Match each geography in the sentence to the closest name in that list and use that exact casing.
+2. CATEGORY / DESCRIPTOR CASING - lowercase unless starting a sentence:
+   - Demographic categories, age groups, race/ethnicity labels, and drivers of change are all lowercase.
+   - Examples: "natural change", "domestic migration", "45-54 age group", "female", "white alone".
+3. GRAMMAR - fix any obvious grammatical errors, but do NOT change wording, facts, or numbers.
+4. Do NOT add, remove, or paraphrase any information.
 
 Original Sentence: {text}
-Output format: {{ "revised_sentence": "your fixed sentence here" }}
+
+Output STRICTLY as a valid JSON object with no extra text:
+{{ "revised_sentence": "corrected sentence here" }}
 """
         return self.generate_text(p, as_json=True, json_key="revised_sentence")
 
@@ -792,34 +814,57 @@ Output format: {{ "revised_sentence": "your fixed sentence here" }}
                 i_per = "N/A"
                 i_per_det = "N/A"
             
+            # --- BUILD MATH CONTEXT BLOCK for LLM ---
+            # Collect all the key quantitative facts from the deterministic layer
+            math_context_parts = [f"Focus value: {self.format_value(fv_val, m_name, m_type)}"]
+            for g in broad_geos:
+                if g.get('Raw_Value') is not None:
+                    diff_v = fv_val - g['Raw_Value'] if fv_val is not None else None
+                    if diff_v is not None:
+                        diff_fmt = f"{abs(diff_v):.1f} pp" if ("percent" in m_type.lower() or "rate" in m_type.lower()) else self.format_value(abs(diff_v), m_name, m_type)
+                        math_context_parts.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
+            for g in bench_geos:
+                if g.get('Raw_Value') is not None:
+                    diff_v = fv_val - g['Raw_Value'] if fv_val is not None else None
+                    if diff_v is not None:
+                        diff_fmt = f"{abs(diff_v):.1f} pp" if ("percent" in m_type.lower() or "rate" in m_type.lower()) else self.format_value(abs(diff_v), m_name, m_type)
+                        math_context_parts.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
+            math_context = "; ".join(math_context_parts)
+            math_debug_logs.append(f"Math Context: {math_context}")
+
             # --- LLM SYNTHESIS FOR OVERALL INSIGHT ---
-            synth_prompt = f"""You are an executive data analyst. Synthesize these 4 hardcoded facts about '{m_name}' into ONE highly professional, fluid summary sentence.
+            synth_prompt = f"""You are an executive data analyst. Synthesize the facts below about '{m_name}' into ONE professional, fluid summary sentence.
             
-            FACTS:
+            FACTS (use these as your source of truth):
             1. Internal: {i_int} 
             2. Broad: {i_brd} 
             3. Benchmarks: {i_bnc} 
             4. Peers: {i_per_det}
             
-            CRITICAL RULES:
-            1. DO NOT include any specific numbers or percentages in your summary. Only use qualitative descriptors (e.g., 'higher', 'lower', 'identical', 'the primary category').
+            KEY FIGURES (reference these for magnitudes where relevant):
+            {math_context}
+            
+            RULES:
+            1. Include specific numbers or magnitudes where they add meaningful context (e.g. "by 2.1 percentage points", "at 11,077"). Do NOT list every single figure -- only the most impactful ones.
             2. DO NOT compare a geography to itself.
             3. Start directly with "{fn}".
-            4. Ensure the sentence flows naturally and combines the comparisons elegantly.
-            5. If any comparison fact (Broad, Benchmarks, or Peers) is 'N/A' (not available), ignore that category. Do not mention that data is missing or not available; simply synthesize the remaining available facts.
+            4. Synthesize available comparisons elegantly into one flowing sentence or two short sentences at most.
+            5. If any comparison (Broad, Benchmarks, or Peers) is 'N/A', simply ignore that category.
+            6. Use Title Case for all geography names (e.g. "Pierce County", "Seattle MSA", "United States").
+            7. Use lowercase for demographic/category terms (e.g. "female", "natural change", "45-54 age group").
             
             Output STRICTLY as a valid JSON object: {{ "overall_insight": "your sentence here" }}
             """
             
             i_over_raw = self.generate_text(synth_prompt, as_json=True, json_key="overall_insight") if i_int != "N/A" else "N/A"
-            i_over_grammar = self.apply_grammar_layer(i_over_raw)
             
             all_peer_names = [p["Name"] for p in geo_data.get('Peer_Details', [])]
             broad_names = [g["Name"] for g in broad_geos] if broad_geos else []
             bench_names = [g["Name"] for g in bench_geos] if bench_geos else []
             peer_names = [g["Name"] for g in peer_geos] if peer_geos else []
             valid_geos_over = [fn] + broad_names + bench_names + peer_names + ["Texas", "United States", "US"] + all_peer_names
-            i_over = self.apply_geography_standardization_layer(i_over_grammar, valid_geos_over)
+            # Single unified pass: fix both capitalization and geography casing
+            i_over = self.apply_capitalization_layer(i_over_raw, valid_geos_over)
             
             if cy:
                 bp_comp = bp_comp.replace("[Current Year]", cy)
@@ -876,17 +921,31 @@ Output format: {{ "revised_sentence": "your fixed sentence here" }}
                 topic_summaries[topic] = "N/A"
                 continue
 
+            # Also pass the per-metric math debug for numerical grounding in the topic prompt
+            topic_math = "\n".join([
+                f"- {row2['Metric']}: {row2['Math/Prompt Debug']}"
+                for _, row2 in group.iterrows()
+                if row2.get('Math/Prompt Debug') and row2['Math/Prompt Debug'] != "Deterministic Extraction (Cyborg Arch)"
+            ])
             topic_prompt = f"""You are an executive data analyst writing a single cohesive summary paragraph for the topic: {topic}.
-Synthesize the following key qualitative insights into a smooth, professional paragraph.
-Avoid bullet points. Ensure transitions between sentences feel natural.
+Synthesize the following insights into a smooth, professional paragraph.
 
-Data Points:
+INSIGHTS:
 {insights_str}
+
+KEY FIGURES (use the most impactful numbers to ground the paragraph -- do not repeat every figure):
+{topic_math if topic_math else 'No additional figures available.'}
+
+RULES:
+1. Include specific numbers where they meaningfully support the narrative (e.g. magnitudes, differences).
+2. Avoid bullet points. Transitions between sentences must feel natural.
+3. Use Title Case for geography names. Use lowercase for demographic/category labels.
+4. Do NOT mention data availability or missing comparisons.
 
 Output STRICTLY as a valid JSON object formatted as: {{ "topic_summary": "your paragraph here" }}"""
             
             raw_summary = self.generate_text(topic_prompt, as_json=True, json_key="topic_summary")
-            polished_summary = self.apply_grammar_layer(raw_summary)
+            polished_summary = self.apply_capitalization_layer(raw_summary, [])
             topic_summaries[topic] = polished_summary
             print(f"  [{topic}] Summary generated.\n")
 
@@ -897,11 +956,15 @@ Output STRICTLY as a valid JSON object formatted as: {{ "topic_summary": "your p
         all_topics_combined = "\n".join([f"{t}: {s}" for t, s in topic_summaries.items() if s != "N/A"])
         
         complete_summary_prompt = f"""You are an executive data analyst writing a single, high-level executive summary for a dashboard.
-Synthesize the following topic-level summaries into ONE cohesive paragraph that highlights the most critical insights across all topics.
-Do not use bullet points. Keep it professional, objective, and insightful.
+Synthesize the following topic-level summaries into ONE cohesive paragraph that highlights the most critical insights.
 
 Topic Summaries:
 {all_topics_combined}
+
+RULES:
+1. Include the most impactful specific figures where they strengthen the narrative. Do not enumerate every number.
+2. Do not use bullet points. Keep it professional, objective, and insightful.
+3. Use Title Case for geography names. Use lowercase for demographic/category labels.
 
 Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "your executive summary here" }}"""
 
