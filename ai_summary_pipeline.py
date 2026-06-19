@@ -24,7 +24,8 @@ except ImportError:
 
 class AISummaryPipeline:
     def __init__(self, mode: str = "gemini", model_name: str = "gemma3", 
-                 gemini_model: str = "gemini-2.5-flash", api_key: str = None):
+                 gemini_model: str = "gemini-2.5-flash", api_key: str = None,
+                 vertexai: bool = None, project: str = None, location: str = None):
         """
         Initialize the AI Summary Pipeline.
         
@@ -32,13 +33,26 @@ class AISummaryPipeline:
             mode (str): Model provider, either "gemini" or "ollama". Default is "gemini".
             model_name (str): Model name for Ollama mode (default: "gemma3").
             gemini_model (str): Model name for Gemini mode (default: "gemini-2.5-flash").
-            api_key (str, optional): API Key for Gemini. If None, it will be automatically 
-                                     loaded from the GEMINI_API_KEY environment variable.
+            api_key (str, optional): API Key for Gemini Developer API. If None, loaded from GEMINI_API_KEY.
+            vertexai (bool, optional): Whether to use Vertex AI backend instead of Developer API. 
+                                      If None, auto-detected from GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_CLOUD_PROJECT.
+            project (str, optional): Google Cloud project ID (for Vertex AI mode).
+            location (str, optional): Google Cloud region (for Vertex AI mode, e.g. "us-central1").
         """
         self.mode = mode.lower().strip()
         self.model_name = model_name
         self.gemini_model = gemini_model
         self.api_key = api_key
+        
+        # Auto-detect Vertex AI mode if credentials/project are set in the environment
+        if vertexai is None:
+            has_credentials = "GOOGLE_APPLICATION_CREDENTIALS" in os.environ
+            has_project = "GOOGLE_CLOUD_PROJECT" in os.environ
+            vertexai = has_credentials or has_project
+            
+        self.vertexai = vertexai
+        self.project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        self.location = location or os.environ.get("GOOGLE_CLOUD_LOCATION")
         self.gemini_client = None
 
         if self.mode == "gemini":
@@ -47,10 +61,18 @@ class AISummaryPipeline:
                     "The 'google-genai' package is required for 'gemini' mode but is not installed. "
                     "Please install it using: pip install google-genai"
                 )
+            
             client_kwargs = {}
-            if self.api_key:
-                client_kwargs["api_key"] = self.api_key
-            # Uses GEMINI_API_KEY environment variable if api_key is not explicitly passed
+            if self.vertexai:
+                client_kwargs["vertexai"] = True
+                if self.project:
+                    client_kwargs["project"] = self.project
+                if self.location:
+                    client_kwargs["location"] = self.location
+            else:
+                if self.api_key:
+                    client_kwargs["api_key"] = self.api_key
+                    
             self.gemini_client = genai.Client(**client_kwargs)
             
         elif self.mode == "ollama":
@@ -896,6 +918,9 @@ def run_pipeline(blueprint_path: str,
                  model_name: str = 'gemma3',
                  gemini_model: str = 'gemini-2.5-flash',
                  api_key: str = None,
+                 vertexai: bool = None,
+                 project: str = None,
+                 location: str = None,
                  output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
     """
     Module-level convenience function to run the pipeline.
@@ -905,7 +930,10 @@ def run_pipeline(blueprint_path: str,
         mode=mode, 
         model_name=model_name, 
         gemini_model=gemini_model, 
-        api_key=api_key
+        api_key=api_key,
+        vertexai=vertexai,
+        project=project,
+        location=location
     )
     return pipeline.run(
         blueprint_path=blueprint_path,
@@ -930,6 +958,10 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", default="gemma3", help="Ollama model name (default: gemma3)")
     parser.add_argument("--gemini-model", default="gemini-2.5-flash", help="Gemini model name (default: gemini-2.5-flash)")
     parser.add_argument("--api-key", default=os.getenv("GEMINI_API_KEY"), help="Gemini API Key (falls back to GEMINI_API_KEY env var)")
+    parser.add_argument("--vertexai", action="store_true", default=None, help="Force Vertex AI mode (instead of Developer API)")
+    parser.add_argument("--no-vertexai", action="store_false", dest="vertexai", help="Force disable Vertex AI mode")
+    parser.add_argument("--project", default=os.getenv("GOOGLE_CLOUD_PROJECT"), help="Google Cloud project ID for Vertex AI")
+    parser.add_argument("--location", default=os.getenv("GOOGLE_CLOUD_LOCATION"), help="Google Cloud location for Vertex AI")
     parser.add_argument("--output", default="dashboard_data_debug_v4.csv", help="Path to save output CSV file")
     
     args = parser.parse_args()
@@ -944,5 +976,8 @@ if __name__ == "__main__":
         model_name=args.model_name,
         gemini_model=args.gemini_model,
         api_key=args.api_key,
+        vertexai=args.vertexai,
+        project=args.project,
+        location=args.location,
         output_path=args.output
     )
