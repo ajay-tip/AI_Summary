@@ -438,6 +438,9 @@ class AISummaryPipeline:
             df_pop = master_df.filter(pl.col("Metric") == "POPESTIMATE")
             if df_pop.is_empty() or df_pop.filter(pl.col("Year") == 1990).is_empty(): return None, years_context, False
             
+            # Deduplicate df_pop to prevent cartesian product join duplicate rows
+            df_pop = df_pop.group_by(["NAME", "Role", "Year"]).agg(pl.col("Value").mean())
+            
             years = df_pop["Year"].drop_nulls().unique().sort()
             if len(years) > 0: years_context["latest"] = str(years[-1])
             if len(years) > 1: years_context["prev"] = str(years[-2])
@@ -737,7 +740,12 @@ Output format: {{ "revised_sentence": "your fixed sentence here" }}
             start_time = time.time()
             
             geo_data, years_ctx, is_cat = self.calculate_metric_data(master_df, df_pyr, m_name, v_json, m_type)
-            if not geo_data: 
+            
+            # Print debug info to trace geo_data contents and roles
+            print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
+            
+            if not geo_data or 'Focus' not in geo_data: 
+                print(f"  [Skipped] Metric '{m_name}' because Focus geography data is missing.")
                 continue
                 
             fn = geo_data['Focus']['Name']
@@ -798,6 +806,7 @@ Output format: {{ "revised_sentence": "your fixed sentence here" }}
             2. DO NOT compare a geography to itself.
             3. Start directly with "{fn}".
             4. Ensure the sentence flows naturally and combines the comparisons elegantly.
+            5. If any comparison fact (Broad, Benchmarks, or Peers) is 'N/A' (not available), ignore that category. Do not mention that data is missing or not available; simply synthesize the remaining available facts.
             
             Output STRICTLY as a valid JSON object: {{ "overall_insight": "your sentence here" }}
             """
