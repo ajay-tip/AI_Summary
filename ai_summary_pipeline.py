@@ -766,9 +766,14 @@ Output STRICTLY as a valid JSON object with no extra text:
             # Print debug info to trace geo_data contents and roles
             print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
             
-            if not geo_data or 'Focus' not in geo_data: 
-                print(f"  [Skipped] Metric '{m_name}' because Focus geography data is missing.")
-                continue
+            if not geo_data or 'Focus' not in geo_data:
+                if geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
+                    geo_data['Focus'] = geo_data['Broad'][0]
+                    geo_data['Broad'] = [] # Omit broad summary
+                    print(f"  [Fallback] Metric '{m_name}' Focus missing, using Broad as Focus: {geo_data['Focus']['Name']}")
+                else:
+                    print(f"  [Skipped] Metric '{m_name}' because Focus geography data is missing.")
+                    continue
                 
             fn = geo_data['Focus']['Name']
             fv_val = geo_data['Focus'].get('Raw_Value')
