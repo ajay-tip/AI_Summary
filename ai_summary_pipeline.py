@@ -106,7 +106,16 @@ class AISummaryPipeline:
         if source_type == "ACS":
             return df.select([pl.col("Year").cast(pl.Int64), pl.col("Cleaned Field Name").alias("Metric"), pl.col("NAME"), pl.col("Value").cast(pl.Float64), pl.col("Role")])
         elif source_type == "COMPONENTS":
-            return df.select([pl.col("Year").cast(pl.Int64), pl.col("Value Type").alias("Metric"), pl.col("NAME"), pl.col("Values").alias("Value").cast(pl.Float64), pl.col("Role")])
+            return df.select([
+                pl.col("Year").cast(pl.Int64),
+                pl.col("Value Type").alias("Metric"),
+                pl.col("NAME"),
+                pl.col("Values").alias("Value").cast(pl.Float64),
+                pl.col("Role"),
+                pl.col("Source"),
+                pl.col("Dataset"),
+                pl.col("Geography Level")
+            ])
         elif source_type == "POP_PYRAMID":
             return df.select([pl.col("YEAR").cast(pl.Int64).alias("Year"), (pl.col("Variable Group Description") + " (" + pl.col("Age Group Description") + ")").alias("Metric"), pl.col("NAME"), pl.col("Values").alias("Value").cast(pl.Float64), pl.col("Role")])
 
@@ -415,9 +424,25 @@ class AISummaryPipeline:
         is_percentage_metric = "percent" in type_lower or "rate" in type_lower or (("percent" in m_lower or "rate" in m_lower) and "numeric" not in type_lower)
         years_context = {"latest": "", "prev": ""}
         
+        vars_dict = self.parse_variables(variables_json)
+        value_types = []
+        if "Value Type" in vars_dict:
+            if isinstance(vars_dict["Value Type"], list):
+                value_types = vars_dict["Value Type"]
+            else:
+                value_types = [vars_dict["Value Type"]]
+
+        if self.is_population_share_metric(metric_name):
+            return self.calculate_population_share(master_df, years_context, metric_name, m_type, is_change=False)
+        if self.is_population_share_change_metric(metric_name):
+            return self.calculate_population_share(master_df, years_context, metric_name, m_type, is_change=True)
+
         if "driver" in m_lower or "dynamics in drivers" in m_lower:
             is_cumulative = "cumulative" in m_lower
-            drivers = ["NATURALCHG", "DOMESTICMIG", "INTERNATIONALMIG"]
+            if value_types:
+                drivers = [vt.upper() for vt in value_types if isinstance(vt, str)]
+            else:
+                drivers = ["NATURALCHG", "DOMESTICMIG", "INTERNATIONALMIG"]
             df_d = master_df.filter(pl.col("Metric").is_in(drivers))
             
             if df_d.is_empty(): return None, years_context, True
@@ -502,12 +527,12 @@ class AISummaryPipeline:
                 return self.combine_roles(largest, "Chg", metric_name, m_type, is_categorical=True, category_col=group_col), years_context, True
 
         else:
-            target_raw = metric_name 
-            if variables_json and isinstance(variables_json, str):
-                try: target_raw = list(json.loads(variables_json.replace('""', '"')).values())[0] 
-                except: pass
-                    
-            df_metric = master_df.filter(pl.col("Metric") == target_raw)
+            target_raw = metric_name
+            if value_types:
+                df_metric = master_df.filter(pl.col("Metric").is_in([vt for vt in value_types if isinstance(vt, str)]))
+            else:
+                df_metric = master_df.filter(pl.col("Metric") == target_raw)
+            df_metric = self.prefer_pep_source(df_metric, metric_name)
             if df_metric.is_empty(): return None, years_context, False
                 
             if is_percentage_metric:
@@ -543,26 +568,24 @@ class AISummaryPipeline:
     # ==========================================
     # 4. LLM INTERFACE & SYNTHESIS
     # ==========================================
-    def generate_text(self, prompt: str, as_json: bool = False, json_key: str = "overall_insight") -> str:
+    def generate_text(self, prompt: str, as_json: bool = False, json_key: str = "overall_insight", max_words: int = 150) -> str:
         """
         Generates text using the configured model (Gemini or Ollama) with temperature 0.1.
         Includes retry limits/fallbacks and formats/cleans the response as JSON if requested.
         """
-        if not prompt: 
+        if not prompt:
             return "N/A"
-        
+
         limits = [800, 1500, 2500]
         last_error = "Unknown Error"
-        
+
         for limit in limits:
             try:
                 if self.mode == "gemini":
-                    # Configure content generation parameters for Gemini
                     config_args = {"temperature": 0.1}
                     if as_json:
-                        # Request strict JSON response format
                         config_args["response_mime_type"] = "application/json"
-                    
+
                     response = self.gemini_client.models.generate_content(
                         model=self.gemini_model,
                         contents=prompt,
@@ -570,47 +593,49 @@ class AISummaryPipeline:
                     )
                     resp = response.text.strip()
                 else:
-                    # Ollama mode
                     resp = ollama.generate(
-                        model=self.model_name, 
-                        prompt=prompt, 
+                        model=self.model_name,
+                        prompt=prompt,
                         options={"temperature": 0.1, "seed": random.randint(1, 100000), "num_predict": limit}
-                    )['response'].strip()
-                
+                    )["response"].strip()
+
                 resp_clean = re.sub(r'```json\s*', '', resp, flags=re.IGNORECASE)
                 resp_clean = re.sub(r'```\s*', '', resp_clean)
-                
+
                 if as_json:
                     match = re.search(r'\{.*?\}', resp_clean, re.DOTALL)
                     if match:
                         try:
                             val = json.loads(match.group(0)).get(json_key, "")
-                            if not val: val = match.group(0)
-                        except: 
+                            if not val:
+                                val = match.group(0)
+                        except Exception:
                             val = match.group(0)
-                    else: 
+                    else:
                         val = resp_clean
-                        
+
                     val = re.sub(r'\{?\s*\"?' + json_key + r'\"?\s*:\s*\"?', '', val, flags=re.IGNORECASE)
                     val = val.replace('"}', '').replace('}', '').strip()
                     val = re.sub(r'^\"', '', val)
                     val = re.sub(r'\"$', '', val)
                     val = re.sub(r"^.*?(revised_sentence|overall_insight|insight|topic_summary|complete_summary)\"?\s*:\s*\"?", "", val, flags=re.IGNORECASE).strip()
                     val = re.sub(r"^.*?(summary|sentence|data|revised|professional).*?:", "", val, flags=re.IGNORECASE).strip()
-                    
+
                     if not val:
                         last_error = "Empty parsed value"
                         continue
-                    
+
                     if not re.search(r'[.!?\"\'\}]$', val) and limit != limits[-1] and self.mode == "ollama":
                         last_error = "Truncated text detected"
-                        continue 
-                        
-                    return self.sanitize_text(val.strip())
+                        continue
+
+                    val = self.sanitize_text(val.strip())
+                    return self.enforce_word_limit(val, max_words)
                 else:
-                    return self.sanitize_text(resp_clean.strip())
-                    
-            except Exception as e: 
+                    resp_clean = self.sanitize_text(resp_clean.strip())
+                    return self.enforce_word_limit(resp_clean, max_words)
+
+            except Exception as e:
                 last_error = str(e)
                 continue
         return f"Error: {last_error}"
@@ -637,6 +662,109 @@ class AISummaryPipeline:
         # Final pass: strip any remaining non-ASCII chars that slipped through
         text = text.encode('ascii', errors='replace').decode('ascii').replace('?', "'")
         return text
+
+    def enforce_word_limit(self, text: str, max_words: int = 150) -> str:
+        if not isinstance(text, str) or max_words is None:
+            return text
+        words = text.strip().split()
+        if len(words) <= max_words:
+            return text.strip()
+        truncated = " ".join(words[:max_words]).strip()
+        if truncated and truncated[-1] not in ".!?":
+            truncated = truncated.rstrip(' ,;:-') + '.'
+        return truncated
+
+    def parse_variables(self, variables_json: str) -> dict:
+        if not isinstance(variables_json, str) or not variables_json.strip():
+            return {}
+        try:
+            cleaned = variables_json.replace("''", '"').replace('“', '"').replace('”', '"')
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        matches = re.findall(r'"([^\"]+)"\s*:\s*"([^\"]+)"', variables_json)
+        parsed = {}
+        for key, value in matches:
+            if key in parsed:
+                if isinstance(parsed[key], list):
+                    parsed[key].append(value)
+                else:
+                    parsed[key] = [parsed[key], value]
+            else:
+                parsed[key] = value
+        return parsed
+
+    def prefer_pep_source(self, df: pl.DataFrame, metric_name: str) -> pl.DataFrame:
+        if df.is_empty():
+            return df
+        if not isinstance(metric_name, str):
+            return df
+        metric_lower = metric_name.lower()
+        if "population" not in metric_lower and "pop" not in metric_lower:
+            return df
+        pep_filters = []
+        if "Source" in df.columns:
+            pep_filters.append(pl.col("Source").str.contains("PEP", case=False, null=False))
+        if "Dataset" in df.columns:
+            pep_filters.append(pl.col("Dataset").str.contains("PEP", case=False, null=False))
+        if not pep_filters:
+            return df
+        combined_filter = pep_filters[0]
+        if len(pep_filters) > 1:
+            combined_filter = combined_filter | pep_filters[1]
+        df_pep = df.filter(combined_filter)
+        return df_pep if not df_pep.is_empty() else df
+
+    def is_population_share_metric(self, metric_name: str) -> bool:
+        if not isinstance(metric_name, str):
+            return False
+        lower = metric_name.lower()
+        return "share" in lower and "broad region" in lower and "change" not in lower
+
+    def is_population_share_change_metric(self, metric_name: str) -> bool:
+        if not isinstance(metric_name, str):
+            return False
+        lower = metric_name.lower()
+        return "change" in lower and "share" in lower and "broad region" in lower
+
+    def calculate_population_share(self, master_df: pl.DataFrame, years_context: dict, metric_name: str, m_type: str, is_change: bool):
+        df_pop = master_df.filter((pl.col("Metric") == "POPESTIMATE") & pl.col("Role").is_in(["Focus", "Broad"]))
+        if df_pop.is_empty():
+            return None, years_context, False
+
+        years = df_pop["Year"].drop_nulls().unique().sort()
+        if len(years) > 0:
+            years_context["latest"] = str(years[-1])
+        if len(years) > 1:
+            years_context["prev"] = str(years[-2])
+
+        if is_change and len(years) < 2:
+            return None, years_context, False
+
+        year_role = df_pop.groupby(["Year", "Role"]).agg(pl.col("Value").mean())
+        focus = year_role.filter(pl.col("Role") == "Focus").rename({"Value": "Focus_Value"})
+        broad = year_role.filter(pl.col("Role") == "Broad").rename({"Value": "Broad_Value"})
+        joined = focus.join(broad, on="Year", how="inner").with_columns((pl.col("Focus_Value") / pl.col("Broad_Value") * 100).alias("Share"))
+        if joined.is_empty():
+            return None, years_context, False
+
+        if is_change:
+            joined = joined.sort("Year")
+            latest = joined.row(-1)
+            previous = joined.row(-2)
+            change = float(latest["Share"] - previous["Share"])
+            df_change = pl.DataFrame({"NAME": ["Focus"], "Role": ["Focus"], "Metric": [metric_name], "Change": [change]})
+            return self.combine_roles(df_change, "Change", metric_name, m_type), years_context, False
+
+        latest_share = joined.filter(pl.col("Year") == years[-1]).select([pl.col("Share")])
+        if latest_share.is_empty():
+            return None, years_context, False
+
+        value = float(latest_share.row(0)["Share"])
+        df_share = pl.DataFrame({"NAME": ["Focus"], "Role": ["Focus"], "Metric": [metric_name], "Value": [value]})
+        return self.combine_roles(df_share, "Value", metric_name, m_type), years_context, False
 
     def apply_grammar_layer(self, text: str) -> str:
         """Kept for backward compatibility; delegates to apply_capitalization_layer with no geo list."""
@@ -678,7 +806,7 @@ Original Sentence: {text}
 Output STRICTLY as a valid JSON object with no extra text:
 {{ "revised_sentence": "corrected sentence here" }}
 """
-        return self.generate_text(p, as_json=True, json_key="revised_sentence")
+        return self.generate_text(p, as_json=True, json_key="revised_sentence", max_words=150)
 
     # ==========================================
     # 5. PIPELINE EXECUTION
@@ -865,13 +993,13 @@ Output STRICTLY as a valid JSON object with no extra text:
             Output STRICTLY as a valid JSON object: {{ "overall_insight": "your sentence here" }}
             """
             
-            i_over_raw = self.generate_text(synth_prompt, as_json=True, json_key="overall_insight") if i_int != "N/A" else "N/A"
-            
+            i_over_raw = self.generate_text(synth_prompt, as_json=True, json_key="overall_insight", max_words=150) if i_int != "N/A" else "N/A"
+
             all_peer_names = [p["Name"] for p in geo_data.get('Peer_Details', [])]
             broad_names = [g["Name"] for g in broad_geos] if broad_geos else []
             bench_names = [g["Name"] for g in bench_geos] if bench_geos else []
             peer_names = [g["Name"] for g in peer_geos] if peer_geos else []
-            valid_geos_over = [fn] + broad_names + bench_names + peer_names + ["Texas", "United States", "US"] + all_peer_names
+            valid_geos_over = list({g for g in [fn] + broad_names + bench_names + peer_names + all_peer_names if g})
             # Single unified pass: fix both capitalization and geography casing
             i_over = self.apply_capitalization_layer(i_over_raw, valid_geos_over)
             
@@ -946,10 +1074,12 @@ KEY FIGURES (use the most impactful numbers to ground the paragraph -- do not re
 {topic_math if topic_math else 'No additional figures available.'}
 
 RULES:
-1. Include specific numbers where they meaningfully support the narrative (e.g. magnitudes, differences).
-2. Avoid bullet points. Transitions between sentences must feel natural.
-3. Use Title Case for geography names. Use lowercase for demographic/category labels.
-4. Do NOT mention data availability or missing comparisons.
+1. Keep the paragraph concise and use no more than 150 words.
+2. Include specific numbers where they meaningfully support the narrative (e.g. magnitudes, differences).
+3. Avoid bullet points. Transitions between sentences must feel natural.
+4. Use Title Case for geography names. Use lowercase for demographic/category labels.
+5. Do NOT mention data availability or missing comparisons.
+6. Do not invent new geography names or project-specific place names beyond the provided list.
 
 Output STRICTLY as a valid JSON object formatted as: {{ "topic_summary": "your paragraph here" }}"""
             
@@ -971,13 +1101,15 @@ Topic Summaries:
 {all_topics_combined}
 
 RULES:
-1. Include the most impactful specific figures where they strengthen the narrative. Do not enumerate every number.
-2. Do not use bullet points. Keep it professional, objective, and insightful.
-3. Use Title Case for geography names. Use lowercase for demographic/category labels.
+1. Keep the executive summary concise and use no more than 150 words.
+2. Include the most impactful specific figures where they strengthen the narrative. Do not enumerate every number.
+3. Do not use bullet points. Keep it professional, objective, and insightful.
+4. Use Title Case for geography names. Use lowercase for demographic/category labels.
+5. Do not invent or add project-specific place names beyond the provided list.
 
 Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "your executive summary here" }}"""
 
-        complete_raw = self.generate_text(complete_summary_prompt, as_json=True, json_key="complete_summary")
+        complete_raw = self.generate_text(complete_summary_prompt, as_json=True, json_key="complete_summary", max_words=150)
         complete_polished = self.apply_grammar_layer(complete_raw)
         
         print(f"  [Complete Summary] Summary generated.\n")
@@ -1006,7 +1138,7 @@ def run_pipeline(blueprint_path: str,
                  acs_path: str,
                  components_path: str,
                  pyramid_path: str,
-                 sheet_name: str = 'v2',
+                 sheet_name: str = 'v3',
                  mode: str = 'gemini',
                  model_name: str = 'gemma3',
                  gemini_model: str = 'gemini-2.5-flash',

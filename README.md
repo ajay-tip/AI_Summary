@@ -8,7 +8,9 @@ The **AI Summary Generation Pipeline** is a modular Python-based data processing
 
 - **Dual Model Support**: Supports both **Gemini API** (`gemini-2.5-flash` default) and **Ollama** (`gemma3`, etc.) for generating natural language insights.
 - **Deterministic Cyborg Template Engine**: Automatically calculates internal, broad geographic, benchmark, and peer-detailed insights using math-based template rules before synthesizing them using LLMs.
--- **Flag-based Filtering**: Reads the metric blueprint from Excel (sheet `v3` by default) and automatically filters out rows where `Flag for Use` is set to `False`.
+- **Flag-based Filtering**: Reads the metric blueprint from Excel (sheet `v3` by default) and automatically filters out rows where `Flag for Use` is set to `False`.
+- **Concise LLM Output**: Limits generated summary text to 150 words for overall insight, topic summary, and complete executive summary.
+- **Population Source Preference**: Prefers PEP-sourced population values when available and computes focus-to-broad population share and share change metrics where applicable.
 - **Dynamic File Configurations**: Accepts custom inputs for ACS, Components of Change, Population Pyramid data, and the blueprint sheets.
 - **Importable & CLI-Ready**: Designed both as an importable module and a standalone CLI tool.
 
