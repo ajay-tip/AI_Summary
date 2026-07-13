@@ -118,6 +118,90 @@ class AISummaryPipeline:
             ])
         elif source_type == "POP_PYRAMID":
             return df.select([pl.col("YEAR").cast(pl.Int64).alias("Year"), (pl.col("Variable Group Description") + " (" + pl.col("Age Group Description") + ")").alias("Metric"), pl.col("NAME"), pl.col("Values").alias("Value").cast(pl.Float64), pl.col("Role")])
+        elif source_type == "HAI":
+            field_map = {
+                "median_listing_price": "Median Listing Price",
+                "Calc-Median HH Income": "Calc-Median HH Income",
+                "Calc-Median Value of Owned Units": "Calc-Median Value of Owned Units",
+                "Calc-Median Monthly Rent": "Calc-Median Monthly Rent"
+            }
+            available_fields = [f for f in field_map.keys() if f in df.columns]
+            if not available_fields:
+                return pl.DataFrame()
+
+            return df.select([
+                pl.col("ACS_Year").cast(pl.Int64).alias("Year"),
+                pl.col("month_date_yyyymm").cast(pl.Int64).alias("MonthKey"),
+                pl.col("NAME"),
+                pl.col("Role"),
+                *available_fields,
+            ]).melt(
+                id_vars=["Year", "MonthKey", "NAME", "Role"],
+                value_vars=available_fields,
+                variable_name="Metric",
+                value_name="Value"
+            ).with_columns(
+                pl.col("Metric").apply(lambda x: field_map.get(x, x)).alias("Metric"),
+                pl.col("Value").cast(pl.Float64),
+                pl.lit("HAI").alias("Source"),
+                pl.lit("HAI-CPI Table").alias("Dataset"),
+                pl.lit("HAI").alias("Geography Level")
+            ).filter(pl.col("Value").is_not_null())
+        elif source_type == "CPI":
+            if "Average CPI (Annual)" not in df.columns:
+                return pl.DataFrame()
+            return df.select([
+                pl.col("Year").cast(pl.Int64),
+                pl.lit("Average CPI (Annual)").alias("Metric"),
+                pl.lit("United States").alias("NAME"),
+                pl.col("Average CPI (Annual)").cast(pl.Float64).alias("Value"),
+                pl.lit("Benchmark").alias("Role"),
+                pl.lit("CPI").alias("Source"),
+                pl.lit("CPI Table").alias("Dataset"),
+                pl.lit("National").alias("Geography Level")
+            ])
+        elif source_type == "HAI":
+            field_map = {
+                "Calc-Median HH Income": "Calc-Median HH Income",
+                "Calc-Median Value of Owned Units": "Calc-Median Value of Owned Units",
+                "Calc-Median Monthly Rent": "Calc-Median Monthly Rent",
+                "median_listing_price": "Median Listing Price"
+            }
+            df = df.with_columns(
+                pl.col("ACS_Year").cast(pl.Int64).alias("Year"),
+                pl.col("NAME").cast(pl.Utf8).str.strip_chars(),
+                pl.col("Role").cast(pl.Utf8).str.strip_chars(),
+                pl.col("month_date_yyyymm").cast(pl.Int64).alias("MonthKey")
+            )
+            metric_frames = []
+            for raw_field, metric_name in field_map.items():
+                if raw_field in df.columns:
+                    metric_frames.append(
+                        df.select(["Year", "NAME", "Role", "MonthKey", pl.col(raw_field).alias("Value")])
+                          .with_columns(
+                              pl.lit(metric_name).alias("Metric"),
+                              pl.lit("HAI").alias("Source"),
+                              pl.lit("HAI-CPI Table").alias("Dataset"),
+                              pl.lit("HAI").alias("Geography Level")
+                          )
+                          .filter(pl.col("Value").is_not_null())
+                          .with_columns(pl.col("Value").cast(pl.Float64))
+                          .sort("MonthKey", descending=True)
+                          .group_by(["Year", "NAME", "Role", "Metric"])
+                          .first()
+                    )
+            return pl.concat(metric_frames) if metric_frames else pl.DataFrame()
+        elif source_type == "CPI":
+            return df.select([
+                pl.col("Year").cast(pl.Int64),
+                pl.lit("Average CPI (Annual)").alias("Metric"),
+                pl.lit("United States").alias("NAME"),
+                pl.col("Average CPI (Annual)").cast(pl.Float64).alias("Value"),
+                pl.lit("Benchmark").alias("Role"),
+                pl.lit("CPI").alias("Source"),
+                pl.lit("CPI Table").alias("Dataset"),
+                pl.lit("National").alias("Geography Level")
+            ])
 
     def format_value(self, value, metric_name, m_type=""):
         try:
@@ -152,8 +236,21 @@ class AISummaryPipeline:
     # ==========================================
     # 2. DETERMINISTIC TEMPLATE ENGINE (Cyborg)
     # ==========================================
+    def is_missing_value(self, value):
+        if value is None:
+            return True
+        if isinstance(value, str) and str(value).strip().upper() in ["", "N/A", "NA"]:
+            return True
+        try:
+            if isinstance(value, float) and math.isnan(value):
+                return True
+        except Exception:
+            pass
+        return False
+
     def generate_internal_insight(self, fn, f_val, metric_name, m_type, is_yoy, cy, py, is_cat, f_cat):
-        if f_val is None: return "N/A"
+        if self.is_missing_value(f_val):
+            return "N/A"
         f_str = self.format_value(f_val, metric_name, m_type)
         m_clean = metric_name.lower().replace("percentage ", "").replace("percent ", "")
         
@@ -526,44 +623,152 @@ class AISummaryPipeline:
                 largest = change.sort("Chg", descending=True).group_by(["NAME", "Role"]).first()
                 return self.combine_roles(largest, "Chg", metric_name, m_type, is_categorical=True, category_col=group_col), years_context, True
 
-        else:
-            target_raw = metric_name
-            if value_types:
-                df_metric = master_df.filter(pl.col("Metric").is_in([vt for vt in value_types if isinstance(vt, str)]))
+        data_source_lower = str(d_source).lower() if d_source is not None else ""
+        variable_fields = []
+        if "Fields" in vars_dict:
+            variable_fields = vars_dict["Fields"] if isinstance(vars_dict["Fields"], list) else [vars_dict["Fields"]]
+        elif "Label" in vars_dict:
+            variable_fields = [vars_dict["Label"]]
+        elif "Value Type" in vars_dict:
+            if isinstance(vars_dict["Value Type"], list):
+                variable_fields = vars_dict["Value Type"]
             else:
-                df_metric = master_df.filter(pl.col("Metric") == target_raw)
+                variable_fields = [vars_dict["Value Type"]]
+
+        if any(term in data_source_lower for term in ["acs_series-cpi table"]):
+            if not variable_fields:
+                return None, years_context, False
+            source_field = variable_fields[0]
+            df_metric = master_df.filter(pl.col("Metric") == source_field)
             df_metric = self.prefer_pep_source(df_metric, metric_name)
-            if df_metric.is_empty(): return None, years_context, False
-                
-            if is_percentage_metric:
-                abs_max = df_metric.select(pl.col("Value").abs().max()).item()
-                if abs_max is not None and abs_max <= 1.05 and abs_max > 0:
-                    df_metric = df_metric.with_columns(pl.col("Value") * 100)
-                
+            if df_metric.is_empty():
+                return None, years_context, False
+
             years = df_metric["Year"].drop_nulls().unique().sort()
             if len(years) > 0: years_context["latest"] = str(years[-1])
             if len(years) > 1: years_context["prev"] = str(years[-2])
-                
-            latest_year = df_metric["Year"].max()
-            
+            latest_year = years[-1]
+
             if is_yoy_change:
                 if len(years) < 2: return None, years_context, False
                 prev_year = years[-2]
-                
-                df_l_dedup = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-                df_p_dedup = df_metric.filter(pl.col("Year") == prev_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-                change_df = df_l_dedup.join(df_p_dedup, on=["NAME", "Role"], how="inner")
-                
-                max_val = change_df["Value_right"].max()
-                if is_percentage_metric and max_val and max_val > 100:
-                    change_df = change_df.with_columns((((pl.col("Value") - pl.col("Value_right")) / pl.col("Value_right")) * 100).alias("Change"))
+                df_l = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                df_p = df_metric.filter(pl.col("Year") == prev_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                if self.get_cpi_ratio(master_df, prev_year, latest_year) is not None:
+                    df_p = df_p.with_columns((pl.col("Value") * float(self.get_cpi_ratio(master_df, prev_year, latest_year))).alias("AdjustedPrev"))
+                    change_df = df_l.join(df_p.select(["NAME", "Role", pl.col("AdjustedPrev").alias("Value")]), on=["NAME", "Role"], how="inner")
                 else:
-                    change_df = change_df.with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                    
+                    change_df = df_l.join(df_p, on=["NAME", "Role"], how="inner")
+                change_df = change_df.with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
                 return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
             else:
                 df_dedup = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
                 return self.combine_roles(df_dedup, "Value", metric_name, m_type), years_context, False
+
+        if any(term in data_source_lower for term in ["hai-cpi table", "hai-cpi table-mortgagerates"]):
+            if "mortgagerates" in data_source_lower:
+                print(f"  [Warning] Skipping mortgage-rate based metric '{metric_name}' until mortgage rate support is implemented.")
+                return None, years_context, False
+
+            if not variable_fields:
+                return None, years_context, False
+
+            numeric_fields = [f for f in variable_fields if f and f.lower() != "cpi"]
+            if not numeric_fields:
+                return None, years_context, False
+
+            hai_metrics = [f for f in numeric_fields if f in master_df.select(pl.col("Metric")).to_series().to_list()]
+            if not hai_metrics:
+                # allow direct metric names if HAI data is loaded under metric labels
+                hai_metrics = numeric_fields
+
+            df_hai_metric = master_df.filter(pl.col("Metric").is_in(hai_metrics))
+            if df_hai_metric.is_empty():
+                return None, years_context, False
+
+            latest_month = df_hai_metric.select(pl.col("MonthKey")).drop_nulls().unique().sort().to_series().to_list()
+            if not latest_month:
+                return None, years_context, False
+            latest_month = latest_month[-1]
+            latest_year = latest_month // 100
+            years_context["latest"] = str(latest_year)
+
+            prev_month = latest_month - 100
+            if df_hai_metric.filter(pl.col("MonthKey") == prev_month).is_empty():
+                prev_month = None
+            else:
+                years_context["prev"] = str(prev_month // 100)
+
+            if "compare median list price to median value" in m_lower:
+                comp_df = df_hai_metric.filter(pl.col("MonthKey") == latest_month).filter(pl.col("Metric").is_in(["Median Listing Price", "Calc-Median Value of Owned Units"]))
+                if comp_df.is_empty():
+                    return None, years_context, False
+                max_rows = comp_df.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
+                return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+
+            if "12-month change" in m_lower or ("change" in m_lower and "adjusted by the cpi" in m_lower):
+                if prev_month is None:
+                    return None, years_context, False
+                field = hai_metrics[0]
+                df_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                df_prev = df_hai_metric.filter((pl.col("MonthKey") == prev_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                if df_latest.is_empty() or df_prev.is_empty():
+                    return None, years_context, False
+                adjusted = []
+                for row in df_prev.iter_rows(named=True):
+                    prev_year = row["MonthKey"] // 100 if "MonthKey" in row else latest_year - 1
+                    cpi_ratio = self.get_cpi_ratio(master_df, prev_year, latest_year)
+                    adjusted_value = float(row["Value"]) * cpi_ratio if cpi_ratio else float(row["Value"])
+                    adjusted.append({"NAME": row["NAME"], "Role": row["Role"], "Value": adjusted_value})
+                df_adj_prev = pl.DataFrame(adjusted)
+                change_df = df_latest.join(df_adj_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
+                return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+
+            if "median" in m_lower or "compare" in m_lower:
+                df_latest = df_hai_metric.filter(pl.col("MonthKey") == latest_month).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
+                return self.combine_roles(df_latest, "Value", metric_name, m_type), years_context, False
+
+            return None, years_context, False
+
+        target_raw = metric_name
+        if value_types:
+            df_metric = master_df.filter(pl.col("Metric").is_in([vt for vt in value_types if isinstance(vt, str)]))
+        else:
+            df_metric = master_df.filter(pl.col("Metric") == target_raw)
+        df_metric = self.prefer_pep_source(df_metric, metric_name)
+        if df_metric.is_empty():
+            return None, years_context, False
+
+        if is_percentage_metric:
+            abs_max = df_metric.select(pl.col("Value").abs().max()).item()
+            if abs_max is not None and abs_max <= 1.05 and abs_max > 0:
+                df_metric = df_metric.with_columns(pl.col("Value") * 100)
+
+        years = df_metric["Year"].drop_nulls().unique().sort()
+        if len(years) > 0: years_context["latest"] = str(years[-1])
+        if len(years) > 1: years_context["prev"] = str(years[-2])
+
+        latest_year = df_metric["Year"].max()
+
+        if is_yoy_change:
+            if len(years) < 2:
+                return None, years_context, False
+            prev_year = years[-2]
+
+            df_l_dedup = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+            df_p_dedup = df_metric.filter(pl.col("Year") == prev_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+            change_df = df_l_dedup.join(df_p_dedup, on=["NAME", "Role"], how="inner")
+
+            max_val = change_df["Value_right"].max()
+            if is_percentage_metric and max_val and max_val > 100:
+                change_df = change_df.with_columns((((pl.col("Value") - pl.col("Value_right")) / pl.col("Value_right")) * 100).alias("Change"))
+            else:
+                change_df = change_df.with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
+
+            return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+        else:
+            df_dedup = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+            return self.combine_roles(df_dedup, "Value", metric_name, m_type), years_context, False
 
     # ==========================================
     # 4. LLM INTERFACE & SYNTHESIS
@@ -677,14 +882,27 @@ class AISummaryPipeline:
     def parse_variables(self, variables_json: str) -> dict:
         if not isinstance(variables_json, str) or not variables_json.strip():
             return {}
+
+        cleaned = variables_json.strip()
+        cleaned = cleaned.replace("''", '"').replace("‘", '"').replace("’", '"').replace('“', '"').replace('”', '"')
+
+        # Try valid JSON first
         try:
-            cleaned = variables_json.replace("''", '"').replace('“', '"').replace('”', '"')
             parsed = json.loads(cleaned)
             if isinstance(parsed, dict):
                 return parsed
+            if isinstance(parsed, list):
+                return {"Fields": parsed}
         except Exception:
             pass
-        matches = re.findall(r'"([^\"]+)"\s*:\s*"([^\"]+)"', variables_json)
+
+        # Handle JSON-like lists without explicit keys: {"A", "B"}
+        list_values = re.findall(r'"([^"]+)"', cleaned)
+        if list_values and ":" not in cleaned:
+            return {"Fields": list_values}
+
+        # Handle simple key:value pairs in plain text
+        matches = re.findall(r'"([^\"]+)"\s*:\s*"([^\"]+)"', cleaned)
         parsed = {}
         for key, value in matches:
             if key in parsed:
@@ -694,7 +912,34 @@ class AISummaryPipeline:
                     parsed[key] = [parsed[key], value]
             else:
                 parsed[key] = value
+
         return parsed
+
+    def get_average_cpi(self, master_df: pl.DataFrame, year: int):
+        if year is None:
+            return None
+        cpi_row = master_df.filter((pl.col("Metric") == "Average CPI (Annual)") & (pl.col("Year") == year))
+        if cpi_row.is_empty():
+            return None
+        return float(cpi_row.select(pl.col("Value").mean()).item())
+
+    def get_cpi_ratio(self, master_df: pl.DataFrame, from_year: int, to_year: int):
+        cpi_from = self.get_average_cpi(master_df, from_year)
+        cpi_to = self.get_average_cpi(master_df, to_year)
+        if cpi_from and cpi_to and cpi_from != 0:
+            return cpi_to / cpi_from
+        return None
+
+    def adjust_to_current_dollars(self, value, from_year: int, to_year: int, master_df: pl.DataFrame):
+        if value is None:
+            return None
+        try:
+            ratio = self.get_cpi_ratio(master_df, from_year, to_year)
+            if ratio is None:
+                return float(value)
+            return float(value) * ratio
+        except Exception:
+            return float(value)
 
     def prefer_pep_source(self, df: pl.DataFrame, metric_name: str) -> pl.DataFrame:
         if df.is_empty():
@@ -812,7 +1057,8 @@ Output STRICTLY as a valid JSON object with no extra text:
     # 5. PIPELINE EXECUTION
     # ==========================================
     def run(self, blueprint_path: str, acs_path: str, components_path: str, pyramid_path: str,
-            sheet_name: str = 'v3', output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
+            hai_path: str = "HAI.csv", cpi_path: str = "cpi.xlsx",
+            sheet_name: str = 'AI Summary', output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
         """
         Executes the AI Summary generation pipeline.
 
@@ -821,7 +1067,9 @@ Output STRICTLY as a valid JSON object with no extra text:
             acs_path (str): Path to ACS series CSV.
             components_path (str): Path to components of change CSV.
             pyramid_path (str): Path to population pyramid CSV.
-            sheet_name (str): Excel sheet name to use (default: 'v3').
+            hai_path (str): Path to HAI monthly dataset CSV.
+            cpi_path (str): Path to CPI lookup workbook.
+            sheet_name (str): Excel sheet name to use (default: 'AI Summary').
             output_path (str): Path to save the final CSV output.
 
         Returns:
@@ -831,6 +1079,8 @@ Output STRICTLY as a valid JSON object with no extra text:
         df_acs = pl.read_csv(acs_path, ignore_errors=True)
         df_comp = pl.read_csv(components_path, ignore_errors=True)
         df_pyr = pl.read_csv(pyramid_path, ignore_errors=True)
+        df_hai = pl.DataFrame()
+        df_cpi = pl.DataFrame()
         
         try:
             # Load Excel blueprint using pandas (handles locked/open sheets better on Windows)
@@ -853,11 +1103,31 @@ Output STRICTLY as a valid JSON object with no extra text:
             print(f"Failed to load Excel blueprint sheet '{sheet_name}'. Error: {e}")
             return pd.DataFrame()
 
-        master_df = pl.concat([
-            self.standardize_dataset(df_acs, "ACS"), 
-            self.standardize_dataset(df_comp, "COMPONENTS"), 
+        if os.path.exists(hai_path):
+            try:
+                df_hai = pl.read_csv(hai_path, ignore_errors=True)
+            except Exception as e:
+                print(f"Warning: Failed to load HAI file '{hai_path}'. Error: {e}")
+                df_hai = pl.DataFrame()
+
+        if os.path.exists(cpi_path):
+            try:
+                df_cpi = pl.from_pandas(pd.read_excel(cpi_path, sheet_name=0))
+            except Exception as e:
+                print(f"Warning: Failed to load CPI file '{cpi_path}'. Error: {e}")
+                df_cpi = pl.DataFrame()
+
+        source_frames = [
+            self.standardize_dataset(df_acs, "ACS"),
+            self.standardize_dataset(df_comp, "COMPONENTS"),
             self.standardize_dataset(df_pyr, "POP_PYRAMID")
-        ])
+        ]
+        if not df_hai.is_empty():
+            source_frames.append(self.standardize_dataset(df_hai, "HAI"))
+        if not df_cpi.is_empty():
+            source_frames.append(self.standardize_dataset(df_cpi, "CPI"))
+
+        master_df = pl.concat(source_frames)
         
         final_results = []
         total_processing_time = 0
@@ -889,7 +1159,7 @@ Output STRICTLY as a valid JSON object with no extra text:
             
             start_time = time.time()
             
-            geo_data, years_ctx, is_cat = self.calculate_metric_data(master_df, df_pyr, m_name, v_json, m_type)
+            geo_data, years_ctx, is_cat = self.calculate_metric_data(master_df, df_pyr, m_name, v_json, m_type, d_source)
             
             # Print debug info to trace geo_data contents and roles
             print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
@@ -918,7 +1188,7 @@ Output STRICTLY as a valid JSON object with no extra text:
             # --- DETERMINISTIC EXTRACTION (CYBORG) ---
             i_int = self.generate_internal_insight(fn, fv_val, m_name, m_type, is_yoy, cy, py, is_cat, f_cat)
             
-            broad_geos = geo_data.get('Broad', [])
+            broad_geos = [g for g in geo_data.get('Broad', []) if not self.is_missing_value(g.get('Raw_Value'))]
             if broad_geos:
                 i_brd = self.generate_comparative_insight(fn, broad_geos, fv_val, m_name, m_type, is_cat, f_cat)
             else: 

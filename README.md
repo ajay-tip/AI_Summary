@@ -8,7 +8,7 @@ The **AI Summary Generation Pipeline** is a modular Python-based data processing
 
 - **Dual Model Support**: Supports both **Gemini API** (`gemini-2.5-flash` default) and **Ollama** (`gemma3`, etc.) for generating natural language insights.
 - **Deterministic Cyborg Template Engine**: Automatically calculates internal, broad geographic, benchmark, and peer-detailed insights using math-based template rules before synthesizing them using LLMs.
-- **Flag-based Filtering**: Reads the metric blueprint from Excel (sheet `v3` by default) and automatically filters out rows where `Flag for Use` is set to `False`.
+- **Flag-based Filtering**: Reads the metric blueprint from Excel (sheet `AI Summary` by default) and automatically filters out rows where `Flag for Use` is set to `False`.
 - **Concise LLM Output**: Limits generated summary text to 150 words for overall insight, topic summary, and complete executive summary.
 - **Population Source Preference**: Prefers PEP-sourced population values when available and computes focus-to-broad population share and share change metrics where applicable.
 - **Dynamic File Configurations**: Accepts custom inputs for ACS, Components of Change, Population Pyramid data, and the blueprint sheets.
@@ -67,12 +67,7 @@ df_results = run_pipeline(
     acs_path="ACS_Series_Polars.csv",
     components_path="components_of_change (4).csv",
     pyramid_path="population_pyramid.csv",
-    sheet_name="v3",
-    mode="gemini",
-    gemini_model="gemini-2.5-flash",
-    output_path="dashboard_data_debug_v4.csv"
-)
-
+        sheet_name="AI Summary",
 print(df_results.head())
 ```
 
@@ -81,10 +76,10 @@ Run the script directly from your terminal:
 
 ```bash
 # Using default Gemini configuration:
-python ai_summary_pipeline.py --sheet v3 --output final_dashboard_data.csv
+python ai_summary_pipeline.py --sheet "AI Summary" --output final_dashboard_data.csv
 
 # Using Ollama locally with gemma3 model:
-python ai_summary_pipeline.py --mode ollama --model-name gemma3 --sheet v3
+python ai_summary_pipeline.py --mode ollama --model-name gemma3 --sheet "AI Summary"
 ```
 
 To see all available CLI options:
@@ -109,7 +104,7 @@ The pipeline expects the following input files:
 ```
 ├── README.md                  # This documentation file
 ├── ai_summary_pipeline.py     # Main Python pipeline module & CLI entry point
-├── Metric Topics (DRAFT).xlsx # Excel blueprint containing metric configurations (sheet v3)
+├── Metric Topics (DRAFT).xlsx # Excel blueprint containing metric configurations (sheet AI Summary)
 ├── ACS_Series_Polars.csv      # ACS timeseries source dataset
 ├── components_of_change (4).csv # Population change components dataset
 ├── population_pyramid.csv     # Population age/race breakdown dataset
