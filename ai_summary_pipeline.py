@@ -5,6 +5,7 @@ import json
 import random 
 import re 
 import os
+import math
 
 # Safe/dynamic imports for LLM SDKs to allow running the pipeline
 # without requiring all libraries to be installed if they aren't used.
@@ -102,6 +103,8 @@ class AISummaryPipeline:
             # Fallback to just cleaning the existing NAME column
             if "NAME" in df.columns:
                 df = df.with_columns(pl.col("NAME").cast(pl.Utf8).str.strip_chars())
+            elif "Name" in df.columns:
+                df = df.with_columns(pl.col("Name").cast(pl.Utf8).str.strip_chars().alias("NAME"))
 
         if source_type == "ACS":
             return df.select([pl.col("Year").cast(pl.Int64), pl.col("Cleaned Field Name").alias("Metric"), pl.col("NAME"), pl.col("Value").cast(pl.Float64), pl.col("Role")])
@@ -118,48 +121,6 @@ class AISummaryPipeline:
             ])
         elif source_type == "POP_PYRAMID":
             return df.select([pl.col("YEAR").cast(pl.Int64).alias("Year"), (pl.col("Variable Group Description") + " (" + pl.col("Age Group Description") + ")").alias("Metric"), pl.col("NAME"), pl.col("Values").alias("Value").cast(pl.Float64), pl.col("Role")])
-        elif source_type == "HAI":
-            field_map = {
-                "median_listing_price": "Median Listing Price",
-                "Calc-Median HH Income": "Calc-Median HH Income",
-                "Calc-Median Value of Owned Units": "Calc-Median Value of Owned Units",
-                "Calc-Median Monthly Rent": "Calc-Median Monthly Rent"
-            }
-            available_fields = [f for f in field_map.keys() if f in df.columns]
-            if not available_fields:
-                return pl.DataFrame()
-
-            return df.select([
-                pl.col("ACS_Year").cast(pl.Int64).alias("Year"),
-                pl.col("month_date_yyyymm").cast(pl.Int64).alias("MonthKey"),
-                pl.col("NAME"),
-                pl.col("Role"),
-                *available_fields,
-            ]).melt(
-                id_vars=["Year", "MonthKey", "NAME", "Role"],
-                value_vars=available_fields,
-                variable_name="Metric",
-                value_name="Value"
-            ).with_columns(
-                pl.col("Metric").apply(lambda x: field_map.get(x, x)).alias("Metric"),
-                pl.col("Value").cast(pl.Float64),
-                pl.lit("HAI").alias("Source"),
-                pl.lit("HAI-CPI Table").alias("Dataset"),
-                pl.lit("HAI").alias("Geography Level")
-            ).filter(pl.col("Value").is_not_null())
-        elif source_type == "CPI":
-            if "Average CPI (Annual)" not in df.columns:
-                return pl.DataFrame()
-            return df.select([
-                pl.col("Year").cast(pl.Int64),
-                pl.lit("Average CPI (Annual)").alias("Metric"),
-                pl.lit("United States").alias("NAME"),
-                pl.col("Average CPI (Annual)").cast(pl.Float64).alias("Value"),
-                pl.lit("Benchmark").alias("Role"),
-                pl.lit("CPI").alias("Source"),
-                pl.lit("CPI Table").alias("Dataset"),
-                pl.lit("National").alias("Geography Level")
-            ])
         elif source_type == "HAI":
             field_map = {
                 "Calc-Median HH Income": "Calc-Median HH Income",
@@ -1408,7 +1369,7 @@ def run_pipeline(blueprint_path: str,
                  acs_path: str,
                  components_path: str,
                  pyramid_path: str,
-                 sheet_name: str = 'v3',
+                 sheet_name: str = 'AI Summary',
                  mode: str = 'gemini',
                  model_name: str = 'gemma3',
                  gemini_model: str = 'gemini-2.5-flash',
@@ -1448,7 +1409,7 @@ if __name__ == "__main__":
     parser.add_argument("--acs", default="ACS_Series_Polars.csv", help="Path to ACS series CSV file")
     parser.add_argument("--components", default="components_of_change (4).csv", help="Path to components of change CSV file")
     parser.add_argument("--pyramid", default="population_pyramid.csv", help="Path to population pyramid CSV file")
-    parser.add_argument("--sheet", default="v3", help="Excel sheet name to use (default: v3)")
+    parser.add_argument("--sheet", default="AI Summary", help="Excel sheet name to use (default: AI Summary)")
     parser.add_argument("--mode", default="gemini", choices=["gemini", "ollama"], help="Model mode (gemini or ollama)")
     parser.add_argument("--model-name", default="gemma3", help="Ollama model name (default: gemma3)")
     parser.add_argument("--gemini-model", default="gemini-2.5-flash", help="Gemini model name (default: gemini-2.5-flash)")
