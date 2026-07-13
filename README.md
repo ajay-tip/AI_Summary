@@ -8,7 +8,7 @@ The **AI Summary Generation Pipeline** is a modular Python-based data processing
 
 - **Dual Model Support**: Supports both **Gemini API** (`gemini-2.5-flash` default) and **Ollama** (`gemma3`, etc.) for generating natural language insights.
 - **Deterministic Cyborg Template Engine**: Automatically calculates internal, broad geographic, benchmark, and peer-detailed insights using math-based template rules before synthesizing them using LLMs.
-- **Flag-based Filtering**: Reads the metric blueprint from Excel (sheet `v2` by default) and automatically filters out rows where `Flag for Use` is set to `False`.
+-- **Flag-based Filtering**: Reads the metric blueprint from Excel (sheet `v3` by default) and automatically filters out rows where `Flag for Use` is set to `False`.
 - **Dynamic File Configurations**: Accepts custom inputs for ACS, Components of Change, Population Pyramid data, and the blueprint sheets.
 - **Importable & CLI-Ready**: Designed both as an importable module and a standalone CLI tool.
 
@@ -65,7 +65,7 @@ df_results = run_pipeline(
     acs_path="ACS_Series_Polars.csv",
     components_path="components_of_change (4).csv",
     pyramid_path="population_pyramid.csv",
-    sheet_name="v2",
+    sheet_name="v3",
     mode="gemini",
     gemini_model="gemini-2.5-flash",
     output_path="dashboard_data_debug_v4.csv"
@@ -79,10 +79,10 @@ Run the script directly from your terminal:
 
 ```bash
 # Using default Gemini configuration:
-python ai_summary_pipeline.py --sheet v2 --output final_dashboard_data.csv
+python ai_summary_pipeline.py --sheet v3 --output final_dashboard_data.csv
 
 # Using Ollama locally with gemma3 model:
-python ai_summary_pipeline.py --mode ollama --model-name gemma3 --sheet v2
+python ai_summary_pipeline.py --mode ollama --model-name gemma3 --sheet v3
 ```
 
 To see all available CLI options:
@@ -107,7 +107,7 @@ The pipeline expects the following input files:
 ```
 ├── README.md                  # This documentation file
 ├── ai_summary_pipeline.py     # Main Python pipeline module & CLI entry point
-├── Metric Topics (DRAFT).xlsx # Excel blueprint containing metric configurations (sheet v2)
+├── Metric Topics (DRAFT).xlsx # Excel blueprint containing metric configurations (sheet v3)
 ├── ACS_Series_Polars.csv      # ACS timeseries source dataset
 ├── components_of_change (4).csv # Population change components dataset
 ├── population_pyramid.csv     # Population age/race breakdown dataset

@@ -684,18 +684,18 @@ Output STRICTLY as a valid JSON object with no extra text:
     # 5. PIPELINE EXECUTION
     # ==========================================
     def run(self, blueprint_path: str, acs_path: str, components_path: str, pyramid_path: str,
-            sheet_name: str = 'v2', output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
+            sheet_name: str = 'v3', output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
         """
         Executes the AI Summary generation pipeline.
-        
+
         Args:
             blueprint_path (str): Path to Excel blueprint (e.g. "Metric Topics (DRAFT).xlsx").
             acs_path (str): Path to ACS series CSV.
             components_path (str): Path to components of change CSV.
             pyramid_path (str): Path to population pyramid CSV.
-            sheet_name (str): Excel sheet name to use (default: 'v2').
+            sheet_name (str): Excel sheet name to use (default: 'v3').
             output_path (str): Path to save the final CSV output.
-            
+
         Returns:
             pd.DataFrame: DataFrame containing the final synthesized results.
         """
@@ -767,10 +767,14 @@ Output STRICTLY as a valid JSON object with no extra text:
             print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
             
             if not geo_data or 'Focus' not in geo_data:
-                if geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
+                # Only use Broad -> Focus fallback for component-style metrics
+                data_source_str = str(d_source).lower() if d_source is not None else ""
+                is_components_source = "component" in data_source_str or "components" in data_source_str
+
+                if is_components_source and geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
                     geo_data['Focus'] = geo_data['Broad'][0]
                     geo_data['Broad'] = [] # Omit broad summary
-                    print(f"  [Fallback] Metric '{m_name}' Focus missing, using Broad as Focus: {geo_data['Focus']['Name']}")
+                    print(f"  [Fallback - COMPONENTS] Metric '{m_name}' Focus missing, using Broad as Focus: {geo_data['Focus']['Name']}")
                 else:
                     print(f"  [Skipped] Metric '{m_name}' because Focus geography data is missing.")
                     continue
@@ -1042,7 +1046,7 @@ if __name__ == "__main__":
     parser.add_argument("--acs", default="ACS_Series_Polars.csv", help="Path to ACS series CSV file")
     parser.add_argument("--components", default="components_of_change (4).csv", help="Path to components of change CSV file")
     parser.add_argument("--pyramid", default="population_pyramid.csv", help="Path to population pyramid CSV file")
-    parser.add_argument("--sheet", default="v2", help="Excel sheet name to use (default: v2)")
+    parser.add_argument("--sheet", default="v3", help="Excel sheet name to use (default: v3)")
     parser.add_argument("--mode", default="gemini", choices=["gemini", "ollama"], help="Model mode (gemini or ollama)")
     parser.add_argument("--model-name", default="gemma3", help="Ollama model name (default: gemma3)")
     parser.add_argument("--gemini-model", default="gemini-2.5-flash", help="Gemini model name (default: gemini-2.5-flash)")
