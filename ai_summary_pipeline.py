@@ -1088,7 +1088,37 @@ Output STRICTLY as a valid JSON object with no extra text:
         if not df_cpi.is_empty():
             source_frames.append(self.standardize_dataset(df_cpi, "CPI"))
 
-        master_df = pl.concat(source_frames)
+        source_frames = [frame for frame in source_frames if not frame.is_empty()]
+        if not source_frames:
+            print("No valid standardized source frames available.")
+            return pd.DataFrame()
+
+        all_columns = []
+        column_types = {}
+        for frame in source_frames:
+            for col, dtype in frame.schema.items():
+                if col not in all_columns:
+                    all_columns.append(col)
+                    column_types[col] = dtype
+
+        aligned_frames = []
+        for frame in source_frames:
+            # Ensure each frame uses the same dtype for every shared column.
+            cast_columns = [pl.col(col).cast(column_types[col]).alias(col)
+                            for col, dtype in frame.schema.items()
+                            if col in column_types and dtype != column_types[col]]
+            if cast_columns:
+                frame = frame.with_columns(cast_columns)
+
+            missing_columns = [col for col in all_columns if col not in frame.columns]
+            if missing_columns:
+                frame = frame.with_columns([
+                    pl.lit(None, dtype=column_types[col]).alias(col)
+                    for col in missing_columns
+                ])
+            aligned_frames.append(frame.select(all_columns))
+
+        master_df = pl.concat(aligned_frames, how="vertical")
         
         final_results = []
         total_processing_time = 0
