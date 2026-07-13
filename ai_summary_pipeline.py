@@ -474,7 +474,7 @@ class AISummaryPipeline:
                 
         return geo_data
 
-    def calculate_metric_data(self, master_df, df_pyr, metric_name, variables_json, m_type):
+    def calculate_metric_data(self, master_df, df_pyr, metric_name, variables_json, m_type, d_source=None):
         m_lower = metric_name.lower()
         type_lower = str(m_type).lower()
         
