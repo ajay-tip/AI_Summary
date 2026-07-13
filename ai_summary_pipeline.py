@@ -912,9 +912,9 @@ class AISummaryPipeline:
             return df
         pep_filters = []
         if "Source" in df.columns:
-            pep_filters.append(pl.col("Source").str.contains("PEP", case=False, null=False))
+            pep_filters.append(pl.col("Source").str.to_lowercase().str.contains("pep"))
         if "Dataset" in df.columns:
-            pep_filters.append(pl.col("Dataset").str.contains("PEP", case=False, null=False))
+            pep_filters.append(pl.col("Dataset").str.to_lowercase().str.contains("pep"))
         if not pep_filters:
             return df
         combined_filter = pep_filters[0]
