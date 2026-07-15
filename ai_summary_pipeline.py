@@ -647,7 +647,7 @@ class AISummaryPipeline:
             if df_hai_metric.is_empty():
                 return None, years_context, False
 
-            latest_month = df_hai_metric.select(pl.col("MonthKey")).drop_nulls().unique().sort().to_series().to_list()
+            latest_month = df_hai_metric.select(pl.col("MonthKey")).drop_nulls().unique().sort("MonthKey").to_series().to_list()
             if not latest_month:
                 return None, years_context, False
             latest_month = latest_month[-1]
