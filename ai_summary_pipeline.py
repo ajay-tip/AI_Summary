@@ -949,7 +949,7 @@ class AISummaryPipeline:
         if is_change and len(years) < 2:
             return None, years_context, False
 
-        year_role = df_pop.groupby(["Year", "Role"]).agg(pl.col("Value").mean())
+        year_role = df_pop.group_by(["Year", "Role"]).agg(pl.col("Value").mean())
         focus = year_role.filter(pl.col("Role") == "Focus").rename({"Value": "Focus_Value"})
         broad = year_role.filter(pl.col("Role") == "Broad").rename({"Value": "Broad_Value"})
         joined = focus.join(broad, on="Year", how="inner").with_columns((pl.col("Focus_Value") / pl.col("Broad_Value") * 100).alias("Share"))
