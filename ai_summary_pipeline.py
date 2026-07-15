@@ -587,7 +587,12 @@ class AISummaryPipeline:
         data_source_lower = str(d_source).lower() if d_source is not None else ""
         variable_fields = []
         if "Fields" in vars_dict:
-            variable_fields = vars_dict["Fields"] if isinstance(vars_dict["Fields"], list) else [vars_dict["Fields"]]
+            if isinstance(vars_dict["Fields"], list):
+                variable_fields = vars_dict["Fields"]
+            elif isinstance(vars_dict["Fields"], str):
+                variable_fields = [vars_dict["Fields"]]
+            else:
+                variable_fields = [str(vars_dict["Fields"])]
         elif "Label" in vars_dict:
             variable_fields = [vars_dict["Label"]]
         elif "Value Type" in vars_dict:
