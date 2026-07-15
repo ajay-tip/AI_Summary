@@ -578,7 +578,7 @@ class AISummaryPipeline:
                 
             return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
 
-        elif "largest" in m_lower and ("age" in m_lower or "race" in m_lower):
+        elif "largest" in m_lower and ("age" in m_lower or "race" in m_lower or "gender" in m_lower or "housing" in m_lower) and "population_pyramid" in str(d_source).lower():
             years = df_pyr["YEAR"].drop_nulls().unique().sort()
             if len(years) == 0: return None, years_context, True
             
@@ -642,7 +642,51 @@ class AISummaryPipeline:
         if "acs" in data_source_lower:
             if not variable_fields:
                 return None, years_context, False
-            source_field = variable_fields[0]
+
+            # --- Multi-label categorical handler (e.g. Largest Age Group, Largest Race Group) ---
+            # When the blueprint specifies multiple Label fields and the metric name implies
+            # finding the largest/biggest category, we compare all labels and pick the winner.
+            all_labels = []
+            if "Label" in vars_dict:
+                raw = vars_dict["Label"]
+                all_labels = raw if isinstance(raw, list) else [raw]
+
+            is_largest_metric = "largest" in m_lower
+
+            if is_largest_metric and len(all_labels) > 1:
+                df_labels = master_df.filter(pl.col("Metric").is_in(all_labels))
+                if df_labels.is_empty():
+                    return None, years_context, False
+
+                years = df_labels["Year"].drop_nulls().unique().sort()
+                if len(years) == 0: return None, years_context, False
+                if len(years) > 0: years_context["latest"] = str(years[-1])
+                if len(years) > 1: years_context["prev"] = str(years[-2])
+                latest_year = years[-1]
+
+                if is_yoy_change:
+                    if len(years) < 2: return None, years_context, False
+                    prev_year = years[-2]
+                    df_l = df_labels.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
+                    df_p = df_labels.filter(pl.col("Year") == prev_year).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
+                    joined = df_l.join(df_p, on=["NAME", "Role", "Metric"], how="inner").with_columns(
+                        (pl.col("Value") - pl.col("Value_right")).alias("Change")
+                    )
+                    # Pick the metric with the largest absolute change per geography
+                    largest = joined.with_columns(pl.col("Change").abs().alias("Abs_Change")) \
+                                    .sort("Abs_Change", descending=True) \
+                                    .group_by(["NAME", "Role"]).first()
+                    return self.combine_roles(largest, "Change", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+                else:
+                    df_latest = df_labels.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
+                    # Pick the metric with the largest value per geography
+                    largest = df_latest.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
+                    return self.combine_roles(largest, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+
+            # --- Standard single-field ACS handler ---
+            source_field = variable_fields[0] if variable_fields else (all_labels[0] if all_labels else None)
+            if not source_field:
+                return None, years_context, False
             df_metric = master_df.filter(pl.col("Metric") == source_field)
             df_metric = self.prefer_pep_source(df_metric, metric_name)
             if df_metric.is_empty():
