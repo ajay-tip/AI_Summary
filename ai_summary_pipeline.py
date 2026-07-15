@@ -602,6 +602,11 @@ class AISummaryPipeline:
             if not is_yoy_change:
                 df_l = df_combined.filter(pl.col("YEAR") == latest).group_by(["NAME", "Role", group_col]).agg(pl.col("Values").cast(pl.Float64).sum())
                 largest = df_l.sort("Values", descending=True).group_by(["NAME", "Role"]).first()
+                # FIX: If Focus is absent from the pyramid, return None so we skip cleanly
+                # rather than letting the downstream fallback promote Broad to Focus.
+                if largest.filter(pl.col("Role") == "Focus").is_empty():
+                    print(f"  [Skipped] Metric '{metric_name}': 'Focus' geography not found in population pyramid data.")
+                    return None, years_context, True
                 return self.combine_roles(largest, "Values", metric_name, m_type, is_categorical=True, category_col=group_col), years_context, True
             else:
                 if len(years) < 2: return None, years_context, True
@@ -611,6 +616,10 @@ class AISummaryPipeline:
                 df_p = df_combined.filter(pl.col("YEAR") == prev).group_by(["NAME", "Role", group_col]).agg(pl.col("Values").cast(pl.Float64).sum().alias("VP"))
                 change = df_l.join(df_p, on=["NAME", "Role", group_col], how="inner").with_columns((pl.col("VL") - pl.col("VP")).alias("Chg"))
                 largest = change.sort("Chg", descending=True).group_by(["NAME", "Role"]).first()
+                # FIX: Same guard for the YoY change variant
+                if largest.filter(pl.col("Role") == "Focus").is_empty():
+                    print(f"  [Skipped] Metric '{metric_name}': 'Focus' geography not found in population pyramid data.")
+                    return None, years_context, True
                 return self.combine_roles(largest, "Chg", metric_name, m_type, is_categorical=True, category_col=group_col), years_context, True
 
         data_source_lower = str(d_source).lower() if d_source is not None else ""
@@ -1281,12 +1290,20 @@ Output STRICTLY as a valid JSON object with no extra text:
             print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
             
             if not geo_data or 'Focus' not in geo_data:
-                if geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
+                # FIX: Only allow Broad→Focus promotion for 'components' data source metrics.
+                # For these, the broad geography IS the intended subject (e.g. county-level
+                # components of change). For all other sources (ACS, pyramid, HAI), the
+                # Focus geography is expected to be present. If it's missing it means the
+                # dataset does not cover the focus geography — skip the metric rather than
+                # silently substituting the broad geography.
+                data_src_lower_check = str(d_source).lower() if d_source else ""
+                allow_broad_fallback = "component" in data_src_lower_check
+                if allow_broad_fallback and geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
                     geo_data['Focus'] = geo_data['Broad'][0]
-                    geo_data['Broad'] = [] # Omit broad summary
-                    print(f"  [Fallback Applied] Metric '{m_name}' Focus missing, using Broad as Focus: {geo_data['Focus']['Name']}")
+                    geo_data['Broad'] = []  # Omit broad summary to avoid redundancy
+                    print(f"  [Fallback Applied] Metric '{m_name}' (components source): using Broad as Focus: {geo_data['Focus']['Name']}")
                 else:
-                    print(f"  [Skipped] Metric '{m_name}' because Focus geography data is missing.")
+                    print(f"  [Skipped] Metric '{m_name}': Focus geography missing and data source ('{d_source}') does not permit Broad substitution.")
                     continue
                 
             fn = geo_data['Focus']['Name']
@@ -1354,6 +1371,8 @@ Output STRICTLY as a valid JSON object with no extra text:
             # --- LLM SYNTHESIS FOR OVERALL INSIGHT ---
             synth_prompt = f"""You are an executive data analyst. Synthesize the facts below about '{m_name}' into ONE professional, fluid summary sentence.
             
+            FOCUS GEOGRAPHY: {fn}
+            
             FACTS (use these as your source of truth):
             1. Internal: {i_int} 
             2. Broad: {i_brd} 
@@ -1364,13 +1383,14 @@ Output STRICTLY as a valid JSON object with no extra text:
             {math_context}
             
             RULES:
-            1. Include specific numbers or magnitudes where they add meaningful context (e.g. "by 2.1 percentage points", "at 11,077"). Do NOT list every single figure -- only the most impactful ones.
-            2. DO NOT compare a geography to itself.
-            3. Start directly with "{fn}".
-            4. Synthesize available comparisons elegantly into one flowing sentence or two short sentences at most.
-            5. If any comparison (Broad, Benchmarks, or Peers) is 'N/A', simply ignore that category.
-            6. Use Title Case for all geography names (e.g. "Pierce County", "Seattle MSA", "United States").
-            7. Use lowercase for demographic/category terms (e.g. "female", "natural change", "45-54 age group").
+            1. The summary MUST be about "{fn}" as the primary subject. The broad geography and benchmarks are context only — never write a sentence that makes the broad geography (e.g. the county or MSA) the main subject.
+            2. Start directly with "{fn}" — not with the broad geography or any other place.
+            3. Include specific numbers or magnitudes where they add meaningful context (e.g. "by 2.1 percentage points", "at 11,077"). Do NOT list every single figure — only the most impactful ones.
+            4. DO NOT compare a geography to itself.
+            5. Synthesize available comparisons elegantly into one flowing sentence or two short sentences at most.
+            6. If any comparison (Broad, Benchmarks, or Peers) is 'N/A', simply ignore that category.
+            7. Use Title Case for all geography names (e.g. "Pierce County", "Seattle MSA", "United States").
+            8. Use lowercase for demographic/category terms (e.g. "female", "natural change", "45-54 age group").
             
             Output STRICTLY as a valid JSON object: {{ "overall_insight": "your sentence here" }}
             """
