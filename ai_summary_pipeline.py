@@ -958,9 +958,9 @@ class AISummaryPipeline:
 
         if is_change:
             joined = joined.sort("Year")
-            latest = joined.row(-1)
-            previous = joined.row(-2)
-            change = float(latest["Share"] - previous["Share"])
+            latest_row = joined[-1].to_dicts()[0]
+            previous_row = joined[-2].to_dicts()[0]
+            change = float(latest_row["Share"] - previous_row["Share"])
             df_change = pl.DataFrame({"NAME": ["Focus"], "Role": ["Focus"], "Metric": [metric_name], "Change": [change]})
             return self.combine_roles(df_change, "Change", metric_name, m_type), years_context, False
 
@@ -968,7 +968,7 @@ class AISummaryPipeline:
         if latest_share.is_empty():
             return None, years_context, False
 
-        value = float(latest_share.row(0)["Share"])
+        value = float(latest_share.row(0)[0])
         df_share = pl.DataFrame({"NAME": ["Focus"], "Role": ["Focus"], "Metric": [metric_name], "Value": [value]})
         return self.combine_roles(df_share, "Value", metric_name, m_type), years_context, False
 
