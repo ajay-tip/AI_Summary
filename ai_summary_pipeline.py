@@ -1407,6 +1407,8 @@ def run_pipeline(blueprint_path: str,
                  vertexai: bool = None,
                  project: str = None,
                  location: str = None,
+                 hai_path: str = 'HAI.csv',
+                 cpi_path: str = 'cpi.xlsx',
                  output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
     """
     Module-level convenience function to run the pipeline.
@@ -1426,6 +1428,8 @@ def run_pipeline(blueprint_path: str,
         acs_path=acs_path,
         components_path=components_path,
         pyramid_path=pyramid_path,
+        hai_path=hai_path,
+        cpi_path=cpi_path,
         sheet_name=sheet_name,
         output_path=output_path
     )
