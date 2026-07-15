@@ -153,7 +153,8 @@ class AISummaryPipeline:
                     )
             return pl.concat(metric_frames) if metric_frames else pl.DataFrame()
         elif source_type == "CPI":
-            return df.select([
+            frames = []
+            frames.append(df.select([
                 pl.col("Year").cast(pl.Int64),
                 pl.lit("Average CPI (Annual)").alias("Metric"),
                 pl.lit("United States").alias("NAME"),
@@ -161,7 +162,35 @@ class AISummaryPipeline:
                 pl.lit("Benchmark").alias("Role"),
                 pl.lit("CPI").alias("Source"),
                 pl.lit("CPI Table").alias("Dataset"),
-                pl.lit("National").alias("Geography Level")
+                pl.lit("National").alias("Geography Level"),
+                pl.lit(None).cast(pl.Int64).alias("MonthKey")
+            ]))
+            if "Month" in df.columns and "CPI" in df.columns:
+                frames.append(df.select([
+                    pl.col("Year").cast(pl.Int64),
+                    pl.lit("CPI (Monthly)").alias("Metric"),
+                    pl.lit("United States").alias("NAME"),
+                    pl.col("CPI").cast(pl.Float64).alias("Value"),
+                    pl.lit("Benchmark").alias("Role"),
+                    pl.lit("CPI").alias("Source"),
+                    pl.lit("CPI Table").alias("Dataset"),
+                    pl.lit("National").alias("Geography Level"),
+                    (pl.col("Year").cast(pl.Int64) * 100 + pl.col("Month").cast(pl.Int64)).alias("MonthKey")
+                ]))
+            return pl.concat(frames, how="diagonal_relaxed")
+        elif source_type == "MORTGAGE":
+            if "Monthly Avg 30yr" not in df.columns:
+                return pl.DataFrame()
+            return df.select([
+                pl.col("Year").cast(pl.Int64),
+                pl.lit("Monthly Avg 30yr").alias("Metric"),
+                pl.lit("United States").alias("NAME"),
+                pl.col("Monthly Avg 30yr").cast(pl.Float64).alias("Value"),
+                pl.lit("Benchmark").alias("Role"),
+                pl.lit("Mortgage Rates").alias("Source"),
+                pl.lit("Mortgage Table").alias("Dataset"),
+                pl.lit("National").alias("Geography Level"),
+                (pl.col("Year").cast(pl.Int64) * 100 + pl.col("Month").cast(pl.Int64)).alias("MonthKey")
             ])
 
     def format_value(self, value, metric_name, m_type=""):
@@ -632,10 +661,6 @@ class AISummaryPipeline:
                 return self.combine_roles(df_dedup, "Value", metric_name, m_type), years_context, False
 
         if any(term in data_source_lower for term in ["hai-cpi table", "hai-cpi table-mortgagerates"]):
-            if "mortgagerates" in data_source_lower:
-                print(f"  [Warning] Skipping mortgage-rate based metric '{metric_name}' until mortgage rate support is implemented.")
-                return None, years_context, False
-
             if not variable_fields:
                 return None, years_context, False
 
@@ -645,7 +670,6 @@ class AISummaryPipeline:
 
             hai_metrics = [f for f in numeric_fields if f in master_df.select(pl.col("Metric")).to_series().to_list()]
             if not hai_metrics:
-                # allow direct metric names if HAI data is loaded under metric labels
                 hai_metrics = numeric_fields
 
             df_hai_metric = master_df.filter(pl.col("Metric").is_in(hai_metrics))
@@ -664,7 +688,92 @@ class AISummaryPipeline:
                 prev_month = None
             else:
                 years_context["prev"] = str(prev_month // 100)
+                
+            def process_mortgage(month_target):
+                comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Monthly Avg 30yr"]))
+                if comp_df.is_empty(): return pl.DataFrame()
+                df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric")
+                if "Median Listing Price" not in df_pivot.columns or "Monthly Avg 30yr" not in df_pivot.columns:
+                    return pl.DataFrame()
+                
+                # Payment calculation
+                P = pl.col("Median Listing Price") * 0.8
+                r = (pl.col("Monthly Avg 30yr") / 100.0) / 12.0
+                n = 360
+                payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
+                return df_pivot.with_columns(payment.alias("Value")).select(["NAME", "Role", "Value"])
+                
+            def process_hai(month_target):
+                comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Monthly Avg 30yr", "Calc-Median HH Income"]))
+                if comp_df.is_empty(): return pl.DataFrame()
+                df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric")
+                if "Median Listing Price" not in df_pivot.columns or "Monthly Avg 30yr" not in df_pivot.columns or "Calc-Median HH Income" not in df_pivot.columns:
+                    return pl.DataFrame()
+                P = pl.col("Median Listing Price") * 0.8
+                r = (pl.col("Monthly Avg 30yr") / 100.0) / 12.0
+                n = 360
+                payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
+                q_inc = payment * 12 * 4
+                hai = (pl.col("Calc-Median HH Income") / q_inc) * 100
+                return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"])
+                
+            # If standard relative 12-month change adjusted by CPI
+            if "12-month change" in m_lower or ("change" in m_lower and "adjusted by the cpi" in m_lower):
+                if prev_month is None:
+                    return None, years_context, False
+                
+                if "mortgage payment to median monthly rent" in m_lower:
+                    # Very specific delta
+                    pass # handled below if we merge it or fallback
+                elif "housing affordability index" in m_lower:
+                    df_latest = process_hai(latest_month)
+                    df_prev = process_hai(prev_month)
+                elif "estimated mortgage payment" in m_lower:
+                    df_latest = process_mortgage(latest_month)
+                    df_prev = process_mortgage(prev_month)
+                else:
+                    field = hai_metrics[0]
+                    df_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                    df_prev = df_hai_metric.filter((pl.col("MonthKey") == prev_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
 
+                if df_latest.is_empty() or df_prev.is_empty():
+                    return None, years_context, False
+
+                # CPI ADJUSTMENT to Latest
+                if "adjusted by the cpi" in m_lower or "listing price" in m_lower:
+                    cpi_latest = self.get_latest_cpi(master_df, is_monthly=True)
+                    cpi_current = self.get_cpi_value(master_df, latest_month, is_monthly=True)
+                    cpi_prev = self.get_cpi_value(master_df, prev_month, is_monthly=True)
+                    if cpi_latest and cpi_current and cpi_prev:
+                        df_latest = df_latest.with_columns((pl.col("Value") * (cpi_latest / cpi_current)).alias("Value"))
+                        df_prev = df_prev.with_columns((pl.col("Value") * (cpi_latest / cpi_prev)).alias("Value"))
+
+                change_df = df_latest.join(df_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
+                return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+
+            if "compare estimated mortgage payment to median monthly rent" in m_lower:
+                df_mort = process_mortgage(latest_month)
+                rent_df = df_hai_metric.filter(pl.col("MonthKey") == latest_month).filter(pl.col("Metric") == "Calc-Median Monthly Rent")
+                if rent_df.is_empty() or df_mort.is_empty(): return None, years_context, False
+                rent_df = rent_df.group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                
+                df_mort = df_mort.rename({"Value": "Estimated mortgage payment"})
+                rent_df = rent_df.rename({"Value": "Calc-Median Monthly Rent"})
+                
+                comp_df = df_mort.join(rent_df, on=["NAME", "Role"], how="inner")
+                max_rows = comp_df.unpivot(index=["NAME", "Role"], variable_name="Metric", value_name="Value").sort("Value", descending=True).group_by(["NAME", "Role"]).first()
+                return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+
+            if "housing affordability index" in m_lower:
+                df_hai = process_hai(latest_month)
+                if df_hai.is_empty(): return None, years_context, False
+                return self.combine_roles(df_hai, "Value", metric_name, m_type), years_context, False
+
+            if "estimated mortgage payment" in m_lower:
+                df_mort = process_mortgage(latest_month)
+                if df_mort.is_empty(): return None, years_context, False
+                return self.combine_roles(df_mort, "Value", metric_name, m_type), years_context, False
+                
             if "compare median list price to median value" in m_lower:
                 comp_df = df_hai_metric.filter(pl.col("MonthKey") == latest_month).filter(pl.col("Metric").is_in(["Median Listing Price", "Calc-Median Value of Owned Units"]))
                 if comp_df.is_empty():
@@ -672,26 +781,14 @@ class AISummaryPipeline:
                 max_rows = comp_df.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
                 return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
 
-            if "12-month change" in m_lower or ("change" in m_lower and "adjusted by the cpi" in m_lower):
-                if prev_month is None:
-                    return None, years_context, False
-                field = hai_metrics[0]
-                df_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-                df_prev = df_hai_metric.filter((pl.col("MonthKey") == prev_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-                if df_latest.is_empty() or df_prev.is_empty():
-                    return None, years_context, False
-                adjusted = []
-                for row in df_prev.iter_rows(named=True):
-                    prev_year = row["MonthKey"] // 100 if "MonthKey" in row else latest_year - 1
-                    cpi_ratio = self.get_cpi_ratio(master_df, prev_year, latest_year)
-                    adjusted_value = float(row["Value"]) * cpi_ratio if cpi_ratio else float(row["Value"])
-                    adjusted.append({"NAME": row["NAME"], "Role": row["Role"], "Value": adjusted_value})
-                df_adj_prev = pl.DataFrame(adjusted)
-                change_df = df_latest.join(df_adj_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
-
             if "median" in m_lower or "compare" in m_lower:
                 df_latest = df_hai_metric.filter(pl.col("MonthKey") == latest_month).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
+                if "listing price" in m_lower or "value" in m_lower:
+                    cpi_latest = self.get_latest_cpi(master_df, is_monthly=True)
+                    cpi_current = self.get_cpi_value(master_df, latest_month, is_monthly=True)
+                    if cpi_latest and cpi_current:
+                        df_latest = df_latest.with_columns((pl.col("Value") * (cpi_latest / cpi_current)).alias("Value"))
+                
                 return self.combine_roles(df_latest, "Value", metric_name, m_type), years_context, False
 
             return None, years_context, False
@@ -881,13 +978,25 @@ class AISummaryPipeline:
 
         return parsed
 
+    def get_cpi_value(self, master_df: pl.DataFrame, period: int, is_monthly: bool = False):
+        if period is None: return None
+        if is_monthly:
+            row = master_df.filter((pl.col("Metric") == "CPI (Monthly)") & (pl.col("MonthKey") == period))
+        else:
+            row = master_df.filter((pl.col("Metric") == "Average CPI (Annual)") & (pl.col("Year") == period))
+        if row.is_empty(): return None
+        return float(row.select(pl.col("Value").mean()).item())
+
+    def get_latest_cpi(self, master_df: pl.DataFrame, is_monthly: bool = False):
+        if is_monthly:
+            rows = master_df.filter(pl.col("Metric") == "CPI (Monthly)").drop_nulls(subset=["MonthKey"]).sort("MonthKey", descending=True)
+        else:
+            rows = master_df.filter(pl.col("Metric") == "Average CPI (Annual)").drop_nulls(subset=["Year"]).sort("Year", descending=True)
+        if rows.is_empty(): return None
+        return float(rows.select(pl.col("Value")).first().item())
+
     def get_average_cpi(self, master_df: pl.DataFrame, year: int):
-        if year is None:
-            return None
-        cpi_row = master_df.filter((pl.col("Metric") == "Average CPI (Annual)") & (pl.col("Year") == year))
-        if cpi_row.is_empty():
-            return None
-        return float(cpi_row.select(pl.col("Value").mean()).item())
+        return self.get_cpi_value(master_df, year, is_monthly=False)
 
     def get_cpi_ratio(self, master_df: pl.DataFrame, from_year: int, to_year: int):
         cpi_from = self.get_average_cpi(master_df, from_year)
@@ -1023,7 +1132,7 @@ Output STRICTLY as a valid JSON object with no extra text:
     # 5. PIPELINE EXECUTION
     # ==========================================
     def run(self, blueprint_path: str, acs_path: str, components_path: str, pyramid_path: str,
-            hai_path: str = "HAI.csv", cpi_path: str = "cpi.xlsx",
+            hai_path: str = "HAI.csv", cpi_path: str = "cpi.xlsx", mortgage_path: str = "MortgageRates.csv",
             sheet_name: str = 'AI Summary', output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
         """
         Executes the AI Summary generation pipeline.
@@ -1047,6 +1156,7 @@ Output STRICTLY as a valid JSON object with no extra text:
         df_pyr = pl.read_csv(pyramid_path, ignore_errors=True)
         df_hai = pl.DataFrame()
         df_cpi = pl.DataFrame()
+        df_mortgage = pl.DataFrame()
         
         try:
             # Load Excel blueprint using pandas (handles locked/open sheets better on Windows)
@@ -1083,6 +1193,14 @@ Output STRICTLY as a valid JSON object with no extra text:
                 print(f"Warning: Failed to load CPI file '{cpi_path}'. Error: {e}")
                 df_cpi = pl.DataFrame()
 
+        if os.path.exists(mortgage_path):
+            try:
+                df_mortgage = pl.read_csv(mortgage_path, ignore_errors=True)
+            except Exception as e:
+                print(f"Warning: Failed to load Mortgage file '{mortgage_path}'. Error: {e}")
+                df_mortgage = pl.DataFrame()
+        df_mortgage = pl.DataFrame()
+
         source_frames = [
             self.standardize_dataset(df_acs, "ACS"),
             self.standardize_dataset(df_comp, "COMPONENTS"),
@@ -1092,6 +1210,8 @@ Output STRICTLY as a valid JSON object with no extra text:
             source_frames.append(self.standardize_dataset(df_hai, "HAI"))
         if not df_cpi.is_empty():
             source_frames.append(self.standardize_dataset(df_cpi, "CPI"))
+        if not df_mortgage.is_empty():
+            source_frames.append(self.standardize_dataset(df_mortgage, "MORTGAGE"))
 
         source_frames = [frame for frame in source_frames if not frame.is_empty()]
         if not source_frames:
@@ -1410,6 +1530,7 @@ def run_pipeline(blueprint_path: str,
                  location: str = None,
                  hai_path: str = 'HAI.csv',
                  cpi_path: str = 'cpi.xlsx',
+                 mortgage_path: str = 'MortgageRates.csv',
                  output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
     """
     Module-level convenience function to run the pipeline.
@@ -1431,6 +1552,7 @@ def run_pipeline(blueprint_path: str,
         pyramid_path=pyramid_path,
         hai_path=hai_path,
         cpi_path=cpi_path,
+        mortgage_path=mortgage_path,
         sheet_name=sheet_name,
         output_path=output_path
     )
