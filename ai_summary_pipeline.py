@@ -601,7 +601,7 @@ class AISummaryPipeline:
             else:
                 variable_fields = [vars_dict["Value Type"]]
 
-        if any(term in data_source_lower for term in ["acs_series-cpi table"]):
+        if "acs" in data_source_lower:
             if not variable_fields:
                 return None, years_context, False
             source_field = variable_fields[0]
@@ -1161,14 +1161,10 @@ Output STRICTLY as a valid JSON object with no extra text:
             print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
             
             if not geo_data or 'Focus' not in geo_data:
-                # Only use Broad -> Focus fallback for component-style metrics
-                data_source_str = str(d_source).lower() if d_source is not None else ""
-                is_components_source = "component" in data_source_str or "components" in data_source_str
-
-                if is_components_source and geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
+                if geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
                     geo_data['Focus'] = geo_data['Broad'][0]
                     geo_data['Broad'] = [] # Omit broad summary
-                    print(f"  [Fallback - COMPONENTS] Metric '{m_name}' Focus missing, using Broad as Focus: {geo_data['Focus']['Name']}")
+                    print(f"  [Fallback Applied] Metric '{m_name}' Focus missing, using Broad as Focus: {geo_data['Focus']['Name']}")
                 else:
                     print(f"  [Skipped] Metric '{m_name}' because Focus geography data is missing.")
                     continue
