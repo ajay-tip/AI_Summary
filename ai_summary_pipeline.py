@@ -658,6 +658,8 @@ class AISummaryPipeline:
                 if df_labels.is_empty():
                     return None, years_context, False
 
+                df_labels = self.normalize_percentage_metric_values(df_labels, "Value", metric_name, m_type)
+
                 years = df_labels["Year"].drop_nulls().unique().sort()
                 if len(years) == 0: return None, years_context, False
                 if len(years) > 0: years_context["latest"] = str(years[-1])
@@ -855,10 +857,7 @@ class AISummaryPipeline:
         if df_metric.is_empty():
             return None, years_context, False
 
-        if is_percentage_metric:
-            abs_max = df_metric.select(pl.col("Value").abs().max()).item()
-            if abs_max is not None and abs_max <= 1.05 and abs_max > 0:
-                df_metric = df_metric.with_columns(pl.col("Value") * 100)
+        df_metric = self.normalize_percentage_metric_values(df_metric, "Value", metric_name, m_type)
 
         years = df_metric["Year"].drop_nulls().unique().sort()
         if len(years) > 0: years_context["latest"] = str(years[-1])
@@ -1139,6 +1138,42 @@ class AISummaryPipeline:
         df_share = pl.DataFrame({"NAME": ["Focus"], "Role": ["Focus"], "Metric": [metric_name], "Value": [value]})
         return self.combine_roles(df_share, "Value", metric_name, m_type), years_context, False
 
+    def normalize_percentage_metric_values(self, df: pl.DataFrame, value_col: str, metric_name: str, m_type: str) -> pl.DataFrame:
+        """Scale proportion-style values to percentages for percentage metrics when appropriate."""
+        if df.is_empty():
+            return df
+
+        m_lower = str(metric_name).lower()
+        type_lower = str(m_type).lower()
+        is_percentage_metric = "percent" in type_lower or "rate" in type_lower or (("percent" in m_lower or "rate" in m_lower) and "numeric" not in type_lower)
+        if not is_percentage_metric:
+            return df
+
+        abs_max = df.select(pl.col(value_col).abs().max()).item()
+        if abs_max is not None and abs_max <= 1.05 and abs_max > 0:
+            return df.with_columns(pl.col(value_col) * 100)
+        return df
+
+    def enforce_sentence_capitalization(self, text: str) -> str:
+        """Ensure each sentence starts with a capital letter while preserving existing interior casing."""
+        if not isinstance(text, str):
+            return text
+
+        text = text.strip()
+        if not text:
+            return text
+
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        corrected = []
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if sentence[0].islower():
+                sentence = sentence[0].upper() + sentence[1:]
+            corrected.append(sentence)
+        return " ".join(corrected)
+
     def apply_grammar_layer(self, text: str) -> str:
         """Kept for backward compatibility; delegates to apply_capitalization_layer with no geo list."""
         return self.apply_capitalization_layer(text, [])
@@ -1171,15 +1206,17 @@ RULES (apply ALL of them):
 2. CATEGORY / DESCRIPTOR CASING - lowercase unless starting a sentence:
    - Demographic categories, age groups, race/ethnicity labels, and drivers of change are all lowercase.
    - Examples: "natural change", "domestic migration", "45-54 age group", "female", "white alone".
-3. GRAMMAR - fix any obvious grammatical errors, but do NOT change wording, facts, or numbers.
-4. Do NOT add, remove, or paraphrase any information.
+3. SENTENCE STARTS - the first letter of every sentence must be capitalized, even if the word would otherwise be lowercase.
+4. GRAMMAR - fix any obvious grammatical errors, but do NOT change wording, facts, or numbers.
+5. Do NOT add, remove, or paraphrase any information.
 
 Original Sentence: {text}
 
 Output STRICTLY as a valid JSON object with no extra text:
 {{ "revised_sentence": "corrected sentence here" }}
 """
-        return self.generate_text(p, as_json=True, json_key="revised_sentence", max_words=150)
+        revised = self.generate_text(p, as_json=True, json_key="revised_sentence", max_words=150)
+        return self.enforce_sentence_capitalization(revised)
 
     # ==========================================
     # 5. PIPELINE EXECUTION
