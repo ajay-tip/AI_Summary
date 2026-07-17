@@ -82,33 +82,6 @@ class AISummaryPipeline:
                     "The 'ollama' package is required for 'ollama' mode but is not installed. "
                     "Please install it using: pip install ollama"
                 )
-
-    def normalize_geo_name(self, name: str) -> str:
-        if not name:
-            return ""
-        n = name.lower()
-        n = n.replace(", washington", "").replace(", wa", "")
-        n = n.replace(", texas", "").replace(", tx", "")
-        n = n.replace(", colorado", "").replace(", co", "")
-        n = n.replace(" city", "").replace(" county", "").replace(" reservation", "")
-        n = n.replace(" metro area", "").replace(" msa", "")
-        if n in ["us", "usa", "united states"]:
-            n = "united states"
-        import re
-        n = re.sub(r'[^a-z0-9]', '', n)
-        return n
-
-    def is_geo_match(self, name1: str, name2: str) -> bool:
-        n1 = self.normalize_geo_name(name1)
-        n2 = self.normalize_geo_name(name2)
-        if not n1 or not n2:
-            return False
-        if n1 == n2:
-            return True
-        if n1 in n2 or n2 in n1:
-            return True
-        return False
-
     # ==========================================
     # 1. STANDARDIZATION & FORMATTING
     # ==========================================
@@ -1361,48 +1334,18 @@ Output STRICTLY as a valid JSON object with no extra text:
 
         if not df_comp.is_empty():
             df_comp_std = self.standardize_dataset(df_comp, "COMPONENTS")
-            # Build fuzzy name mapping to ACS names
-            comp_names = df_comp_std["NAME"].drop_nulls().unique().to_list()
-            comp_map = {}
-            for name in comp_names:
-                for vname in valid_geo_names:
-                    if self.is_geo_match(name, vname):
-                        comp_map[name] = vname
-                        break
-            if comp_map:
-                df_comp_std = df_comp_std.filter(pl.col("NAME").is_in(list(comp_map.keys())))
-                df_comp_std = df_comp_std.with_columns(pl.col("NAME").replace(comp_map))
-                source_frames.append(df_comp_std)
+            df_comp_std = df_comp_std.filter(pl.col("NAME").is_in(valid_geo_names))
+            source_frames.append(df_comp_std)
 
         if not df_pyr.is_empty():
             df_pyr_std = self.standardize_dataset(df_pyr, "POP_PYRAMID")
-            # Build fuzzy name mapping to ACS names
-            pyr_names = df_pyr_std["NAME"].drop_nulls().unique().to_list()
-            pyr_map = {}
-            for name in pyr_names:
-                for vname in valid_geo_names:
-                    if self.is_geo_match(name, vname):
-                        pyr_map[name] = vname
-                        break
-            if pyr_map:
-                df_pyr_std = df_pyr_std.filter(pl.col("NAME").is_in(list(pyr_map.keys())))
-                df_pyr_std = df_pyr_std.with_columns(pl.col("NAME").replace(pyr_map))
-                source_frames.append(df_pyr_std)
+            df_pyr_std = df_pyr_std.filter(pl.col("NAME").is_in(valid_geo_names))
+            source_frames.append(df_pyr_std)
 
         if not df_hai.is_empty():
             df_hai_std = self.standardize_dataset(df_hai, "HAI")
-            # Build fuzzy name mapping to ACS names
-            hai_names = df_hai_std["NAME"].drop_nulls().unique().to_list()
-            hai_map = {}
-            for name in hai_names:
-                for vname in valid_geo_names:
-                    if self.is_geo_match(name, vname):
-                        hai_map[name] = vname
-                        break
-            if hai_map:
-                df_hai_std = df_hai_std.filter(pl.col("NAME").is_in(list(hai_map.keys())))
-                df_hai_std = df_hai_std.with_columns(pl.col("NAME").replace(hai_map))
-                source_frames.append(df_hai_std)
+            df_hai_std = df_hai_std.filter(pl.col("NAME").is_in(valid_geo_names))
+            source_frames.append(df_hai_std)
 
         if not df_cpi.is_empty():
             source_frames.append(self.standardize_dataset(df_cpi, "CPI"))
