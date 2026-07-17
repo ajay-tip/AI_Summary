@@ -5,3 +5,5 @@ __pycache__/
 .virtual_documents/
 .DS_Store
 Thumbs.db
+*.twbx
+.venv/

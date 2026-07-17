@@ -1230,8 +1230,8 @@ Output STRICTLY as a valid JSON object with no extra text:
     # 5. PIPELINE EXECUTION
     # ==========================================
     def run(self, blueprint_path: str, acs_path: str, components_path: str, pyramid_path: str,
-            hai_path: str = "HAI.csv", cpi_path: str = "cpi.xlsx", mortgage_path: str = "MortgageRates.csv",
-            sheet_name: str = 'AI Summary', output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
+            hai_path: str = "examples/HAI.csv", cpi_path: str = "examples/cpi.xlsx", mortgage_path: str = "examples/MortgageRates.csv",
+            sheet_name: str = 'AI Summary', output_path: str = 'AI_Summary.csv') -> pd.DataFrame:
         """
         Executes the AI Summary generation pipeline.
 
@@ -1632,10 +1632,10 @@ Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "you
         return df_final
 
 
-def run_pipeline(blueprint_path: str,
-                 acs_path: str,
-                 components_path: str,
-                 pyramid_path: str,
+def run_pipeline(blueprint_path: str = 'Metric Topics (DRAFT).xlsx',
+                 acs_path: str = 'examples/ACS_Series_Polars.csv',
+                 components_path: str = 'examples/components_of_change (4).csv',
+                 pyramid_path: str = 'examples/population_pyramid.csv',
                  sheet_name: str = 'AI Summary',
                  mode: str = 'gemini',
                  model_name: str = 'gemma3',
@@ -1644,10 +1644,10 @@ def run_pipeline(blueprint_path: str,
                  vertexai: bool = None,
                  project: str = None,
                  location: str = None,
-                 hai_path: str = 'HAI.csv',
-                 cpi_path: str = 'cpi.xlsx',
-                 mortgage_path: str = 'MortgageRates.csv',
-                 output_path: str = 'dashboard_data_debug_v4.csv') -> pd.DataFrame:
+                 hai_path: str = 'examples/HAI.csv',
+                 cpi_path: str = 'examples/cpi.xlsx',
+                 mortgage_path: str = 'examples/MortgageRates.csv',
+                 output_path: str = 'AI_Summary.csv') -> pd.DataFrame:
     """
     Module-level convenience function to run the pipeline.
     Useful for importing and executing in other scripts.
@@ -1679,9 +1679,12 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Run the AI Summary Generation Pipeline.")
     parser.add_argument("--blueprint", default="Metric Topics (DRAFT).xlsx", help="Path to Excel blueprint file")
-    parser.add_argument("--acs", default="ACS_Series_Polars.csv", help="Path to ACS series CSV file")
-    parser.add_argument("--components", default="components_of_change (4).csv", help="Path to components of change CSV file")
-    parser.add_argument("--pyramid", default="population_pyramid.csv", help="Path to population pyramid CSV file")
+    parser.add_argument("--acs", default="examples/ACS_Series_Polars.csv", help="Path to ACS series CSV file")
+    parser.add_argument("--components", default="examples/components_of_change (4).csv", help="Path to components of change CSV file")
+    parser.add_argument("--pyramid", default="examples/population_pyramid.csv", help="Path to population pyramid CSV file")
+    parser.add_argument("--hai", default="examples/HAI.csv", help="Path to HAI monthly CSV file")
+    parser.add_argument("--cpi", default="examples/cpi.xlsx", help="Path to CPI Excel workbook")
+    parser.add_argument("--mortgage", default="examples/MortgageRates.csv", help="Path to Mortgage Rates CSV file")
     parser.add_argument("--sheet", default="AI Summary", help="Excel sheet name to use (default: AI Summary)")
     parser.add_argument("--mode", default="gemini", choices=["gemini", "ollama"], help="Model mode (gemini or ollama)")
     parser.add_argument("--model-name", default="gemma3", help="Ollama model name (default: gemma3)")
@@ -1691,7 +1694,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-vertexai", action="store_false", dest="vertexai", help="Force disable Vertex AI mode")
     parser.add_argument("--project", default=os.getenv("GOOGLE_CLOUD_PROJECT"), help="Google Cloud project ID for Vertex AI")
     parser.add_argument("--location", default=os.getenv("GOOGLE_CLOUD_LOCATION"), help="Google Cloud location for Vertex AI")
-    parser.add_argument("--output", default="dashboard_data_debug_v4.csv", help="Path to save output CSV file")
+    parser.add_argument("--output", default="AI_Summary.csv", help="Path to save output CSV file")
     
     args = parser.parse_args()
     
@@ -1700,6 +1703,9 @@ if __name__ == "__main__":
         acs_path=args.acs,
         components_path=args.components,
         pyramid_path=args.pyramid,
+        hai_path=args.hai,
+        cpi_path=args.cpi,
+        mortgage_path=args.mortgage,
         sheet_name=args.sheet,
         mode=args.mode,
         model_name=args.model_name,
