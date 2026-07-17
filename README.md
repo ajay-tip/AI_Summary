@@ -107,15 +107,15 @@ The pipeline processes diverse demographic and economic indicators. Below is the
 
 | Metric Category | Source / Condition | Mathematical Formula / Logic | Description |
 | :--- | :--- | :--- | :--- |
-| **Population Share in Broad Region** | `POPESTIMATE` from ACS/PEP sources | $$\text{Share} = \frac{\text{Mean POPESTIMATE for Focus}}{\text{Mean POPESTIMATE for Broad}} \times 100$$ | Calculates the Focus geography's percentage share of the Broad geography's population. |
-| **Change in Population Share** | YoY Share Comparison | $$\text{Change} = \text{Share}_{\text{latest}} - \text{Share}_{\text{prev}}$$ | Computes the percentage point change in population share year-over-year. |
-| **Cumulative Population Change** | Metric name includes "cumulative" and "population" | Absolute change: $$\text{Change} = \text{POP}_{\text{latest}} - \text{POP}_{1990}$$ <br> Percentage change: $$\text{Change} = \frac{\text{POP}_{\text{latest}} - \text{POP}_{1990}}{\text{POP}_{1990}} \times 100$$ | Measures growth or decline in population since the 1990 baseline. |
-| **Primary Driver of Change** | `components_of_change` | Finds the component with the largest absolute value in the latest year among: <br> • `NATURALCHG` (Natural Change) <br> • `DOMESTICMIG` (Domestic Migration) <br> • `INTERNATIONALMIG` (International Migration) | Pinpoints the primary force behind a geography's population shifts. |
-| **Largest Group (Population Pyramid)** | `population_pyramid` | Selects category $C$ that maximizes: $$\sum \text{Population Count}_C$$ in the latest year. | Identifies the most populous age or race-ethnicity group. |
-| **Largest Change in Group (Pyramid)** | `population_pyramid` YoY change | Selects category $C$ that maximizes: $$\text{Count}_{C, \text{latest}} - \text{Count}_{C, \text{prev}}$$ | Identifies the cohort experiencing the largest absolute growth or decline. |
-| **Largest Group (ACS Series)** | Multi-label cohort proportion | Identifies the Label $L$ with the maximum proportion value in the latest year. | Identifies the largest housing type or demographic cohort from ACS. |
-| **Largest Change in Group (ACS)** | Multi-label cohort YoY change | Identifies the Label $L$ that maximizes: $$\text{Value}_{L, \text{latest}} - \text{Value}_{L, \text{prev}}$$ | Identifies the cohort with the largest year-over-year percentage point shift. |
-| **Standard YoY Change** | Single-field metric | $$\text{Change} = \text{Value}_{\text{latest}} - \text{Value}_{\text{prev}}$$ | Standard simple year-over-year numeric or percentage point change. |
+| **Population Share in Broad Region** | `POPESTIMATE` from ACS/PEP sources | `Share = (Mean POPESTIMATE for Focus / Mean POPESTIMATE for Broad) * 100` | Calculates the Focus geography's percentage share of the Broad geography's population. |
+| **Change in Population Share** | YoY Share Comparison | `Change = Share (latest) - Share (previous)` | Computes the percentage point change in population share year-over-year. |
+| **Cumulative Population Change** | Metric name includes "cumulative" and "population" | Absolute change:<br>`Change = POP (latest) - POP (1990)`<br>Percentage change:<br>`Change = [ (POP (latest) - POP (1990)) / POP (1990) ] * 100` | Measures growth or decline in population since the 1990 baseline. |
+| **Primary Driver of Change** | `components_of_change` | Finds the component with the largest absolute value in the latest year among:<br>• `NATURALCHG` (Natural Change)<br>• `DOMESTICMIG` (Domestic Migration)<br>• `INTERNATIONALMIG` (International Migration) | Pinpoints the primary force behind a geography's population shifts. |
+| **Largest Group (Population Pyramid)** | `population_pyramid` | Selects category `C` that maximizes:<br>`Sum of Population Count for C` in the latest year. | Identifies the most populous age or race-ethnicity group. |
+| **Largest Change in Group (Pyramid)** | `population_pyramid` YoY change | Selects category `C` that maximizes:<br>`Count (C, latest) - Count (C, previous)` | Identifies the cohort experiencing the largest absolute growth or decline. |
+| **Largest Group (ACS Series)** | Multi-label cohort proportion | Identifies the Label `L` with the maximum proportion value in the latest year. | Identifies the largest housing type or demographic cohort from ACS. |
+| **Largest Change in Group (ACS)** | Multi-label cohort YoY change | Identifies the Label `L` that maximizes:<br>`Value (L, latest) - Value (L, previous)` | Identifies the cohort with the largest year-over-year percentage point shift. |
+| **Standard YoY Change** | Single-field metric | `Change = Value (latest) - Value (previous)` | Standard simple year-over-year numeric or percentage point change. |
 
 ---
 
@@ -125,18 +125,18 @@ For metrics sourced from the `HAI-CPI Table`, the pipeline computes custom affor
 
 #### Monthly Mortgage Payment Formula
 The estimated monthly mortgage payment assumes a **20% down payment** (financing 80% of the median listing price) on a standard **30-year fixed mortgage**:
-$$\text{Principal (P)} = \text{Median Listing Price} \times 0.80$$
-$$\text{Monthly Interest Rate (r)} = \frac{\text{Monthly Avg 30yr Rate}}{100 \times 12}$$
-$$\text{Number of Months (n)} = 360$$
-$$\text{Monthly Payment} = P \times \frac{r(1+r)^n}{(1+r)^n - 1}$$
+*   `Principal (P) = Median Listing Price * 0.80`
+*   `Monthly Interest Rate (r) = (Monthly Avg 30yr Rate / 100) / 12`
+*   `Number of Months (n) = 360`
+*   `Monthly Payment = P * [ r * (1 + r)^n ] / [ (1 + r)^n - 1 ]`
 
 #### Qualifying Annual Income
 Assumes a standard conservative qualifying debt-to-income (DTI) ratio where mortgage payments are capped at **25% of gross income**:
-$$\text{Qualifying Income} = \text{Monthly Payment} \times 12 \times 4$$
+*   `Qualifying Income = Monthly Payment * 12 * 4`
 
 #### Housing Affordability Index (HAI)
 The HAI measures whether a family earning the median household income has enough income to qualify for a mortgage on a median-priced home:
-$$\text{HAI} = \frac{\text{Median Household Income}}{\text{Qualifying Income}} \times 100$$
+*   `HAI = (Median Household Income / Qualifying Income) * 100`
 *   **HAI = 100**: A family earning the median income has exactly the income required to qualify for a median-priced home.
 *   **HAI > 100**: Homeownership is increasingly affordable (family income exceeds qualifying income).
 *   **HAI < 100**: Homeownership is increasingly unaffordable.
