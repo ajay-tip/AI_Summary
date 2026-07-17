@@ -203,7 +203,12 @@ class AISummaryPipeline:
         m_lower = str(metric_name).lower()
         type_lower = str(m_type).lower()
         
-        is_percentage = "percent" in type_lower or "rate" in type_lower or ("percent" in m_lower and "numeric" not in type_lower)
+        is_percentage = (
+            "percent" in type_lower or 
+            "rate" in type_lower or 
+            "categorical" in type_lower or
+            ("percent" in m_lower and "numeric" not in type_lower)
+        )
         if is_percentage_override is not None:
             is_percentage = is_percentage_override
             
@@ -211,6 +216,8 @@ class AISummaryPipeline:
             is_percentage = False
         
         if is_percentage:
+            if "change" in m_lower and val > 0:
+                return f"+{val:.1f}%"
             return f"{val:.1f}%"
                 
         elif "age" in m_lower and "largest" not in m_lower:  
@@ -1160,7 +1167,12 @@ class AISummaryPipeline:
 
         m_lower = str(metric_name).lower()
         type_lower = str(m_type).lower()
-        is_percentage_metric = "percent" in type_lower or "rate" in type_lower or (("percent" in m_lower or "rate" in m_lower) and "numeric" not in type_lower)
+        is_percentage_metric = (
+            "percent" in type_lower or 
+            "rate" in type_lower or 
+            "categorical" in type_lower or
+            (("percent" in m_lower or "rate" in m_lower) and "numeric" not in type_lower)
+        )
         if not is_percentage_metric:
             return df
 
