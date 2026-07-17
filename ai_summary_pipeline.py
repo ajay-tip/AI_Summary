@@ -634,7 +634,12 @@ class AISummaryPipeline:
             else:
                 variable_fields = [str(vars_dict["Fields"])]
         elif "Label" in vars_dict:
-            variable_fields = [vars_dict["Label"]]
+            if isinstance(vars_dict["Label"], list):
+                variable_fields = vars_dict["Label"]
+            elif isinstance(vars_dict["Label"], str):
+                variable_fields = [vars_dict["Label"]]
+            else:
+                variable_fields = [str(vars_dict["Label"])]
         elif "Value Type" in vars_dict:
             if isinstance(vars_dict["Value Type"], list):
                 variable_fields = vars_dict["Value Type"]
@@ -690,14 +695,17 @@ class AISummaryPipeline:
                     largest = df_latest.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
                     return self.combine_roles(largest, "Value", metric_name, m_type, is_categorical=True, category_col="Metric", is_percentage_override=True), years_context, True
 
-            # --- Standard single-field ACS handler ---
-            source_field = variable_fields[0] if variable_fields else (all_labels[0] if all_labels else None)
-            if not source_field:
+            # --- Standard single/multi-field ACS handler ---
+            if not variable_fields:
                 return None, years_context, False
-            df_metric = master_df.filter(pl.col("Metric") == source_field)
+            df_metric = master_df.filter(pl.col("Metric").is_in(variable_fields))
             df_metric = self.prefer_pep_source(df_metric, metric_name)
             if df_metric.is_empty():
                 return None, years_context, False
+
+            # If there are multiple fields, sum them up per geography and year!
+            if len(variable_fields) > 1:
+                df_metric = df_metric.group_by(["NAME", "Role", "Year"]).agg(pl.col("Value").sum())
 
             years = df_metric["Year"].drop_nulls().unique().sort()
             if len(years) > 0: years_context["latest"] = str(years[-1])
