@@ -207,6 +207,7 @@ class AISummaryPipeline:
             "percent" in type_lower or 
             "rate" in type_lower or 
             "categorical" in type_lower or
+            "largest" in m_lower or
             ("percent" in m_lower and "numeric" not in type_lower)
         )
         if is_percentage_override is not None:
@@ -1171,6 +1172,7 @@ class AISummaryPipeline:
             "percent" in type_lower or 
             "rate" in type_lower or 
             "categorical" in type_lower or
+            "largest" in m_lower or
             (("percent" in m_lower or "rate" in m_lower) and "numeric" not in type_lower)
         )
         if not is_percentage_metric:
