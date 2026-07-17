@@ -147,8 +147,6 @@ class AISummaryPipeline:
                           .filter(pl.col("Value").is_not_null())
                           .with_columns(pl.col("Value").cast(pl.Float64))
                           .sort("MonthKey", descending=True)
-                          .group_by(["Year", "NAME", "Role", "Metric"])
-                          .first()
                     )
             return pl.concat(metric_frames) if metric_frames else pl.DataFrame()
         elif source_type == "CPI":
@@ -878,8 +876,8 @@ class AISummaryPipeline:
                 value_units = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Value of Owned Units").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
                 if list_price.is_empty() or value_units.is_empty(): return None, years_context, False
                 
-                list_price = list_price.with_columns(pl.lit("Median Listing Price").alias("Metric"))
-                value_units = value_units.with_columns(pl.lit("Calc-Median Value of Owned Units").alias("Metric"))
+                list_price = list_price.with_columns(pl.lit("Median Listing Price").alias("Metric")).select(["NAME", "Role", "Metric", "Value"])
+                value_units = value_units.with_columns(pl.lit("Calc-Median Value of Owned Units").alias("Metric")).select(["NAME", "Role", "Metric", "Value"])
                 
                 comp_df = pl.concat([list_price, value_units])
                 max_rows = comp_df.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
