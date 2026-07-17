@@ -193,7 +193,7 @@ class AISummaryPipeline:
                 (pl.col("Year").cast(pl.Int64) * 100 + pl.col("Month").cast(pl.Int64)).alias("MonthKey")
             ])
 
-    def format_value(self, value, metric_name, m_type=""):
+    def format_value(self, value, metric_name, m_type="", is_percentage_override=None):
         try:
             val = float(value)
             if val != val: return "N/A"
@@ -204,6 +204,8 @@ class AISummaryPipeline:
         type_lower = str(m_type).lower()
         
         is_percentage = "percent" in type_lower or "rate" in type_lower or ("percent" in m_lower and "numeric" not in type_lower)
+        if is_percentage_override is not None:
+            is_percentage = is_percentage_override
             
         if is_percentage and abs(val) > 1000:
             is_percentage = False
@@ -276,7 +278,7 @@ class AISummaryPipeline:
                 try:
                     f = float(f_val)
                     c = float(c_val)
-                    is_percentage = "percent" in str(m_type).lower() or "rate" in str(m_type).lower() or "percent" in m_clean
+                    is_percentage = "%" in f_str or "%" in c_str or "percent" in str(m_type).lower() or "rate" in str(m_type).lower() or "percent" in m_clean
                     if is_percentage and (abs(f) > 1000 or abs(c) > 1000): is_percentage = False
 
                     if f == c:
@@ -315,17 +317,17 @@ class AISummaryPipeline:
                     draft += f", and {parts[-1]}"
             return draft + "."
 
-    def generate_categorical_peer_detailed_insight(self, f_val, f_cat, peer_details, peer_comb_cat, fn, metric_name, m_type):
+    def generate_categorical_peer_detailed_insight(self, f_val, f_cat, peer_details, peer_comb_cat, fn, metric_name, m_type, is_percentage_override=None):
         """Deterministically generates detailed category comparisons to individual peers."""
         try:
-            f_str = self.format_value(f_val, metric_name, m_type)
+            f_str = self.format_value(f_val, metric_name, m_type, is_percentage_override=is_percentage_override)
             same_cat, diff_cat = [], []
             debug_math = f"Focus ({fn}) Cat: {f_cat} ({f_str}) | "
             
             for p in peer_details:
                 if fn.lower() == p["Name"].lower() or p["Name"].lower() in fn.lower(): continue
                 p_val = float(p["Value"])
-                p_str = self.format_value(p_val, metric_name, m_type)
+                p_str = self.format_value(p_val, metric_name, m_type, is_percentage_override=is_percentage_override)
                 peer_obj = {"name": p["Name"], "cat": p["Category"], "val": p_val, "str": p_str}
                 
                 debug_math += f"[{p['Name']}: {p['Category']} ({p_str})] "
@@ -456,7 +458,7 @@ class AISummaryPipeline:
     # ==========================================
     # 3. UNIFIED DATA ENGINE
     # ==========================================
-    def combine_roles(self, df_result, value_col, metric_name, m_type, is_categorical=False, category_col=None):
+    def combine_roles(self, df_result, value_col, metric_name, m_type, is_categorical=False, category_col=None, is_percentage_override=None):
         geo_data = {}
         if not is_categorical: df_result = df_result.sort(value_col) 
             
@@ -470,9 +472,9 @@ class AISummaryPipeline:
             role_list = []
             for r in rows:
                 if is_categorical: 
-                    role_list.append({"Name": r["NAME"], "Formatted_Value": f"the '{r[category_col]}' group with {self.format_value(r[value_col], metric_name, m_type)}", "Raw_Value": r[value_col], "Category": r[category_col]})
+                    role_list.append({"Name": r["NAME"], "Formatted_Value": f"the '{r[category_col]}' group with {self.format_value(r[value_col], metric_name, m_type, is_percentage_override=is_percentage_override)}", "Raw_Value": r[value_col], "Category": r[category_col]})
                 else: 
-                    role_list.append({"Name": r["NAME"], "Formatted_Value": self.format_value(r[value_col], metric_name, m_type), "Raw_Value": r[value_col]})
+                    role_list.append({"Name": r["NAME"], "Formatted_Value": self.format_value(r[value_col], metric_name, m_type, is_percentage_override=is_percentage_override), "Raw_Value": r[value_col]})
             
             if role == "Focus":
                 geo_data[role] = role_list[0]
@@ -483,10 +485,10 @@ class AISummaryPipeline:
         if not df_peer.is_empty():
             if is_categorical:
                 r = df_peer.row(0, named=True)
-                geo_data["Peer"] = [{"Name": r["NAME"], "Formatted_Value": f"the '{r[category_col]}' group with {self.format_value(r[value_col], metric_name, m_type)}", "Raw_Value": r[value_col], "Category": r[category_col]}]
+                geo_data["Peer"] = [{"Name": r["NAME"], "Formatted_Value": f"the '{r[category_col]}' group with {self.format_value(r[value_col], metric_name, m_type, is_percentage_override=is_percentage_override)}", "Raw_Value": r[value_col], "Category": r[category_col]}]
             else:
                 peer_avg = df_peer[value_col].mean()
-                geo_data["Peer"] = [{"Name": "Peers (Average)", "Formatted_Value": self.format_value(peer_avg, metric_name, m_type), "Raw_Value": peer_avg}]
+                geo_data["Peer"] = [{"Name": "Peers (Average)", "Formatted_Value": self.format_value(peer_avg, metric_name, m_type, is_percentage_override=is_percentage_override), "Raw_Value": peer_avg}]
                 
                 peer_details = []
                 for r in df_peer.iter_rows(named=True):
@@ -650,6 +652,9 @@ class AISummaryPipeline:
             if "Label" in vars_dict:
                 raw = vars_dict["Label"]
                 all_labels = raw if isinstance(raw, list) else [raw]
+            elif "Fields" in vars_dict:
+                raw = vars_dict["Fields"]
+                all_labels = raw if isinstance(raw, list) else [raw]
 
             is_largest_metric = "largest" in m_lower
 
@@ -678,12 +683,12 @@ class AISummaryPipeline:
                     largest = joined.with_columns(pl.col("Change").abs().alias("Abs_Change")) \
                                     .sort("Abs_Change", descending=True) \
                                     .group_by(["NAME", "Role"]).first()
-                    return self.combine_roles(largest, "Change", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+                    return self.combine_roles(largest, "Change", metric_name, m_type, is_categorical=True, category_col="Metric", is_percentage_override=True), years_context, True
                 else:
                     df_latest = df_labels.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
                     # Pick the metric with the largest value per geography
                     largest = df_latest.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
-                    return self.combine_roles(largest, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+                    return self.combine_roles(largest, "Value", metric_name, m_type, is_categorical=True, category_col="Metric", is_percentage_override=True), years_context, True
 
             # --- Standard single-field ACS handler ---
             source_field = variable_fields[0] if variable_fields else (all_labels[0] if all_labels else None)
@@ -1001,13 +1006,15 @@ class AISummaryPipeline:
         cleaned = variables_json.strip()
         cleaned = cleaned.replace("''", '"').replace("‘", '"').replace("’", '"').replace('“', '"').replace('”', '"')
 
-        # Try valid JSON first
+        # Try valid JSON first (only if there are no duplicate keys, as json.loads silently discards them)
         try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, dict):
-                return parsed
-            if isinstance(parsed, list):
-                return {"Fields": parsed}
+            keys = re.findall(r'"([^"]+)"\s*:', cleaned)
+            if len(keys) == len(set(keys)):
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict):
+                    return parsed
+                if isinstance(parsed, list):
+                    return {"Fields": parsed}
         except Exception:
             pass
 
@@ -1206,7 +1213,8 @@ RULES (apply ALL of them):
 2. CATEGORY / DESCRIPTOR CASING - lowercase unless starting a sentence:
    - Demographic categories, age groups, race/ethnicity labels, and drivers of change are all lowercase.
    - Examples: "natural change", "domestic migration", "45-54 age group", "female", "white alone".
-3. SENTENCE STARTS - the first letter of every sentence must be capitalized, even if the word would otherwise be lowercase.
+   - CRITICAL EXCEPTION: If any category or descriptor is the first word of a sentence, its first letter MUST be capitalized (e.g., "International migration is..." instead of "international migration is...").
+3. SENTENCE STARTS - the first letter of every sentence must be capitalized. This rule takes absolute priority over Rule 2. The first letter of any sentence must be capitalized, even if it is a demographic term, age group, or driver of change.
 4. GRAMMAR - fix any obvious grammatical errors, but do NOT change wording, facts, or numbers.
 5. Do NOT add, remove, or paraphrase any information.
 
@@ -1418,11 +1426,12 @@ Output STRICTLY as a valid JSON object with no extra text:
                 c_cat = peer_geos[0].get('Category') if peer_geos else None
                 c_val = peer_geos[0].get('Raw_Value') if peer_geos else None
                 
+                is_pct_override = "%" in geo_data['Focus'].get('Formatted_Value', '')
                 # --- DETERMINISTIC EXTRACTION FOR PEER DETAILED ---
                 if is_cat:
-                    i_per_det, m_per_det = self.generate_categorical_peer_detailed_insight(fv_val, f_cat, peer_details, c_cat, fn, m_name, m_type)
+                    i_per_det, m_per_det = self.generate_categorical_peer_detailed_insight(fv_val, f_cat, peer_details, c_cat, fn, m_name, m_type, is_percentage_override=is_pct_override)
                 else:
-                    is_pct = "percent" in m_type.lower() or "rate" in m_type.lower() or "percent" in m_name.lower()
+                    is_pct = is_pct_override or "percent" in m_type.lower() or "rate" in m_type.lower() or "percent" in m_name.lower()
                     i_per_det, m_per_det = self.generate_peer_detailed_insight(fv_val, peer_details, c_val, fn, m_name, is_pct, m_type)
                     
                 print(f"  [Math Debug] {m_per_det}")
@@ -1472,6 +1481,8 @@ Output STRICTLY as a valid JSON object with no extra text:
             6. If any comparison (Broad, Benchmarks, or Peers) is 'N/A', simply ignore that category.
             7. Use Title Case for all geography names (e.g. "Pierce County", "Seattle MSA", "United States").
             8. Use lowercase for demographic/category terms (e.g. "female", "natural change", "45-54 age group").
+            9. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the numbers show that", "a closer look shows that"). State the analytical facts directly and declaratively.
+            10. The output must be crisp, professional, objective, and directly insertable into an executive-level dashboard card.
             
             Output STRICTLY as a valid JSON object: {{ "overall_insight": "your sentence here" }}
             """
@@ -1563,6 +1574,8 @@ RULES:
 4. Use Title Case for geography names. Use lowercase for demographic/category labels.
 5. Do NOT mention data availability or missing comparisons.
 6. Do not invent new geography names or project-specific place names beyond the provided list.
+7. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the data shows that", "it is important to note that"). State the analytical facts directly and declaratively.
+8. The output must be polished, objective, and directly insertable into an executive-level dashboard topic overview card.
 
 Output STRICTLY as a valid JSON object formatted as: {{ "topic_summary": "your paragraph here" }}"""
             
@@ -1589,6 +1602,8 @@ RULES:
 3. Do not use bullet points. Keep it professional, objective, and insightful.
 4. Use Title Case for geography names. Use lowercase for demographic/category labels.
 5. Do not invent or add project-specific place names beyond the provided list.
+6. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the data shows that", "it is important to note that"). State the analytical facts directly and declaratively.
+7. The output must be polished, objective, and directly insertable into an executive-level dashboard home-screen summary widget.
 
 Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "your executive summary here" }}"""
 
