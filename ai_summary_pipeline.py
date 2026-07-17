@@ -1325,7 +1325,6 @@ Output STRICTLY as a valid JSON object with no extra text:
             except Exception as e:
                 print(f"Warning: Failed to load Mortgage file '{mortgage_path}'. Error: {e}")
                 df_mortgage = pl.DataFrame()
-        df_mortgage = pl.DataFrame()
 
         df_acs_std = self.standardize_dataset(df_acs, "ACS")
         valid_geo_names = df_acs_std["NAME"].drop_nulls().unique().to_list()
