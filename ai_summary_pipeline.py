@@ -767,7 +767,7 @@ class AISummaryPipeline:
             def process_mortgage(month_target):
                 comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Monthly Avg 30yr"]))
                 if comp_df.is_empty(): return pl.DataFrame()
-                df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric")
+                df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric", aggregate_function="mean")
                 if "Median Listing Price" not in df_pivot.columns or "Monthly Avg 30yr" not in df_pivot.columns:
                     return pl.DataFrame()
                 
@@ -781,7 +781,7 @@ class AISummaryPipeline:
             def process_hai(month_target):
                 comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Monthly Avg 30yr", "Calc-Median HH Income"]))
                 if comp_df.is_empty(): return pl.DataFrame()
-                df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric")
+                df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric", aggregate_function="mean")
                 if "Median Listing Price" not in df_pivot.columns or "Monthly Avg 30yr" not in df_pivot.columns or "Calc-Median HH Income" not in df_pivot.columns:
                     return pl.DataFrame()
                 P = pl.col("Median Listing Price") * 0.8
