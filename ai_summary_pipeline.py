@@ -800,8 +800,31 @@ class AISummaryPipeline:
                     return None, years_context, False
                 
                 if "mortgage payment to median monthly rent" in m_lower:
-                    # Very specific delta
-                    pass # handled below if we merge it or fallback
+                    mort_latest = process_mortgage(latest_month)
+                    mort_prev = process_mortgage(prev_month)
+                    rent_latest = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Monthly Rent").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
+                    rent_prev = rent_latest # Fallback to latest ACS year if prior isn't dynamically matched
+                    if mort_latest.is_empty() or mort_prev.is_empty() or rent_latest.is_empty(): return None, years_context, False
+                    
+                    diff_latest = mort_latest.join(rent_latest, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
+                    diff_prev = mort_prev.join(rent_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
+                    change_df = diff_latest.join(diff_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
+                    return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                
+                elif "median list price to median value" in m_lower and "comparison" in m_lower:
+                    list_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == "Median Listing Price")).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                    val_latest = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Value of Owned Units").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
+                    if list_latest.is_empty() or val_latest.is_empty(): return None, years_context, False
+                    
+                    list_prev = df_hai_metric.filter((pl.col("MonthKey") == prev_month) & (pl.col("Metric") == "Median Listing Price")).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                    val_prev = val_latest # Fallback to latest ACS year if prior isn't dynamically matched
+                    if list_prev.is_empty() or val_prev.is_empty(): return None, years_context, False
+                    
+                    diff_latest = list_latest.join(val_latest, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
+                    diff_prev = list_prev.join(val_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
+                    change_df = diff_latest.join(diff_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
+                    return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                
                 elif "housing affordability index" in m_lower:
                     df_latest = process_hai(latest_month)
                     df_prev = process_hai(prev_month)
@@ -813,7 +836,7 @@ class AISummaryPipeline:
                     df_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
                     df_prev = df_hai_metric.filter((pl.col("MonthKey") == prev_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
 
-                if df_latest.is_empty() or df_prev.is_empty():
+                if 'df_latest' not in locals() or 'df_prev' not in locals() or df_latest.is_empty() or df_prev.is_empty():
                     return None, years_context, False
 
                 # CPI ADJUSTMENT to Latest
@@ -830,12 +853,11 @@ class AISummaryPipeline:
 
             if "compare estimated mortgage payment to median monthly rent" in m_lower:
                 df_mort = process_mortgage(latest_month)
-                rent_df = df_hai_metric.filter(pl.col("MonthKey") == latest_month).filter(pl.col("Metric") == "Calc-Median Monthly Rent")
+                rent_df = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Monthly Rent").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
                 if rent_df.is_empty() or df_mort.is_empty(): return None, years_context, False
-                rent_df = rent_df.group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
                 
-                df_mort = df_mort.rename({"Value": "Estimated mortgage payment"})
-                rent_df = rent_df.rename({"Value": "Calc-Median Monthly Rent"})
+                df_mort = df_mort.rename({"Value": "Estimated mortgage payment"}).select(["NAME", "Role", "Estimated mortgage payment"])
+                rent_df = rent_df.rename({"Value": "Calc-Median Monthly Rent"}).select(["NAME", "Role", "Calc-Median Monthly Rent"])
                 
                 comp_df = df_mort.join(rent_df, on=["NAME", "Role"], how="inner")
                 max_rows = comp_df.unpivot(index=["NAME", "Role"], variable_name="Metric", value_name="Value").sort("Value", descending=True).group_by(["NAME", "Role"]).first()
@@ -852,9 +874,14 @@ class AISummaryPipeline:
                 return self.combine_roles(df_mort, "Value", metric_name, m_type), years_context, False
                 
             if "compare median list price to median value" in m_lower:
-                comp_df = df_hai_metric.filter(pl.col("MonthKey") == latest_month).filter(pl.col("Metric").is_in(["Median Listing Price", "Calc-Median Value of Owned Units"]))
-                if comp_df.is_empty():
-                    return None, years_context, False
+                list_price = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == "Median Listing Price")).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
+                value_units = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Value of Owned Units").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
+                if list_price.is_empty() or value_units.is_empty(): return None, years_context, False
+                
+                list_price = list_price.with_columns(pl.lit("Median Listing Price").alias("Metric"))
+                value_units = value_units.with_columns(pl.lit("Calc-Median Value of Owned Units").alias("Metric"))
+                
+                comp_df = pl.concat([list_price, value_units])
                 max_rows = comp_df.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
                 return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
 
@@ -1127,6 +1154,13 @@ class AISummaryPipeline:
 
     def calculate_population_share(self, master_df: pl.DataFrame, years_context: dict, metric_name: str, m_type: str, is_change: bool):
         df_pop = master_df.filter((pl.col("Metric") == "POPESTIMATE") & pl.col("Role").is_in(["Focus", "Broad"]))
+        
+        has_focus = not df_pop.filter(pl.col("Role") == "Focus").is_empty()
+        has_broad = not df_pop.filter(pl.col("Role") == "Broad").is_empty()
+        
+        if not (has_focus and has_broad):
+            df_pop = master_df.filter((pl.col("Metric") == "Population") & pl.col("Role").is_in(["Focus", "Broad"]))
+            
         if df_pop.is_empty():
             return None, years_context, False
 
