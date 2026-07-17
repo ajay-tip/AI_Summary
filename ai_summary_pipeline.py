@@ -715,6 +715,8 @@ class AISummaryPipeline:
             if len(variable_fields) > 1:
                 df_metric = df_metric.group_by(["NAME", "Role", "Year"]).agg(pl.col("Value").sum())
 
+            df_metric = self.normalize_percentage_metric_values(df_metric, "Value", metric_name, m_type)
+
             years = df_metric["Year"].drop_nulls().unique().sort()
             if len(years) > 0: years_context["latest"] = str(years[-1])
             if len(years) > 1: years_context["prev"] = str(years[-2])
