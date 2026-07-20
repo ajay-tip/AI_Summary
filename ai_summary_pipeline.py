@@ -6,6 +6,8 @@ import random
 import re 
 import os
 import math
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 # Safe/dynamic imports for LLM SDKs to allow running the pipeline
 # without requiring all libraries to be installed if they aren't used.
@@ -229,6 +231,37 @@ class AISummaryPipeline:
         else: 
             if val >= 1_000_000: return f"{val/1_000_000:.2f} million"
             return f"{val:,.0f}"
+
+    def format_period_placeholders(self, text):
+        """
+        Replaces bracketed month placeholders with actual formatted dates.
+        Example: [Current Month] -> July 2026
+                 [Previous-12 Month] -> July 2025
+        """
+        if not isinstance(text, str) or not text:
+            return text
+
+        # Define the current date (or set this to your specific reporting date)
+        current_date = datetime.now()
+        
+        # Calculate previous 12 months
+        previous_12_date = current_date - relativedelta(months=12)
+
+        # Format dates as "Month Year" (e.g., "June 2025")
+        current_month_str = current_date.strftime('%B %Y')
+        prev_12_month_str = previous_12_date.strftime('%B %Y')
+
+        # Dictionary of placeholders to replace
+        replacements = {
+            '[Current Month]': current_month_str,
+            '[Previous-12 Month]': prev_12_month_str
+        }
+
+        # Apply replacements
+        for placeholder, actual_date in replacements.items():
+            text = text.replace(placeholder, actual_date)
+
+        return text
 
     # ==========================================
     # 2. DETERMINISTIC TEMPLATE ENGINE (Cyborg)
@@ -765,27 +798,38 @@ class AISummaryPipeline:
                 years_context["prev"] = str(prev_month // 100)
                 
             def process_mortgage(month_target):
-                comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Monthly Avg 30yr"]))
-                if comp_df.is_empty(): return pl.DataFrame()
-                df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric", aggregate_function="mean")
-                if "Median Listing Price" not in df_pivot.columns or "Monthly Avg 30yr" not in df_pivot.columns:
-                    return pl.DataFrame()
+                # Treated as a national lookup value (like CPI)
+                m_val = self.get_mortgage_value(master_df, month_target, is_monthly=True)
+                if m_val is None: return pl.DataFrame()
                 
-                # Payment calculation
-                P = pl.col("Median Listing Price") * 0.8
-                r = (pl.col("Monthly Avg 30yr") / 100.0) / 12.0
+                # Filter for local metrics only (e.g. Median Listing Price)
+                comp_df = df_hai_metric.filter((pl.col("MonthKey") == month_target) & (pl.col("Metric") == "Median Listing Price"))
+                if comp_df.is_empty(): return pl.DataFrame()
+                
+                # Calculate payment using the national lookup rate broadcasted to local geos
+                P = pl.col("Value") * 0.8
+                r = (m_val / 100.0) / 12.0
                 n = 360
                 payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
-                return df_pivot.with_columns(payment.alias("Value")).select(["NAME", "Role", "Value"])
+                return comp_df.with_columns(payment.alias("Value")).select(["NAME", "Role", "Value"])
                 
             def process_hai(month_target):
-                comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Monthly Avg 30yr", "Calc-Median HH Income"]))
+                # Treated as a national lookup value (like CPI)
+                m_val = self.get_mortgage_value(master_df, month_target, is_monthly=True)
+                if m_val is None: return pl.DataFrame()
+                
+                # Filter for local metrics only
+                comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Calc-Median HH Income"]))
                 if comp_df.is_empty(): return pl.DataFrame()
+                
+                # Pivot local metrics
                 df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric", aggregate_function="mean")
-                if "Median Listing Price" not in df_pivot.columns or "Monthly Avg 30yr" not in df_pivot.columns or "Calc-Median HH Income" not in df_pivot.columns:
+                if "Median Listing Price" not in df_pivot.columns or "Calc-Median HH Income" not in df_pivot.columns:
                     return pl.DataFrame()
+                    
+                # Calculate HAI using the national lookup rate broadcasted to local geos
                 P = pl.col("Median Listing Price") * 0.8
-                r = (pl.col("Monthly Avg 30yr") / 100.0) / 12.0
+                r = (m_val / 100.0) / 12.0
                 n = 360
                 payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
                 q_inc = payment * 12 * 4
@@ -927,10 +971,20 @@ class AISummaryPipeline:
             else:
                 change_df = change_df.with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
 
-            return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+            result_df = self.combine_roles(change_df, "Change", metric_name, m_type)
         else:
             df_dedup = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-            return self.combine_roles(df_dedup, "Value", metric_name, m_type), years_context, False
+            result_df = self.combine_roles(df_dedup, "Value", metric_name, m_type)
+
+        # --- LOOKUP BYPASS ---
+        # If the source is a national lookup (Mortgage Rates or CPI) and no local Focus exists,
+        # promote the Benchmark (National) data to Focus so the metric is not skipped.
+        data_src_lower = str(d_source).lower() if d_source else ""
+        if ("mortgagerates" in data_src_lower or "cpi" in data_src_lower) and result_df:
+            if 'Focus' not in result_df and 'Benchmark' in result_df and len(result_df['Benchmark']) > 0:
+                result_df['Focus'] = result_df['Benchmark'][0]
+
+        return result_df, years_context, False
 
     # ==========================================
     # 4. LLM INTERFACE & SYNTHESIS
@@ -1105,6 +1159,25 @@ class AISummaryPipeline:
         if cpi_from and cpi_to and cpi_from != 0:
             return cpi_to / cpi_from
         return None
+
+    def get_mortgage_value(self, master_df: pl.DataFrame, period: int, is_monthly: bool = True):
+        """Fetches the national 30-year fixed mortgage rate for a given period."""
+        if period is None: return None
+        if is_monthly:
+            row = master_df.filter((pl.col("Metric") == "Monthly Avg 30yr") & (pl.col("MonthKey") == period))
+        else:
+            row = master_df.filter((pl.col("Metric") == "Monthly Avg 30yr") & (pl.col("Year") == period))
+        if row.is_empty(): return None
+        return float(row.select(pl.col("Value").mean()).item())
+
+    def get_latest_mortgage_value(self, master_df: pl.DataFrame, is_monthly: bool = True):
+        """Fetches the most recent national 30-year fixed mortgage rate."""
+        if is_monthly:
+            rows = master_df.filter(pl.col("Metric") == "Monthly Avg 30yr").drop_nulls(subset=["MonthKey"]).sort("MonthKey", descending=True)
+        else:
+            rows = master_df.filter(pl.col("Metric") == "Monthly Avg 30yr").drop_nulls(subset=["Year"]).sort("Year", descending=True)
+        if rows.is_empty(): return None
+        return float(rows.select(pl.col("Value")).first().item())
 
     def adjust_to_current_dollars(self, value, from_year: int, to_year: int, master_df: pl.DataFrame):
         if value is None:
@@ -1577,6 +1650,10 @@ Output STRICTLY as a valid JSON object with no extra text:
                 bp_comp = bp_comp.replace("[Previous Year]", py)
                 bp_curr = bp_curr.replace("[Previous Year]", py)
 
+            # Replace month placeholders
+            bp_comp = self.format_period_placeholders(bp_comp)
+            bp_curr = self.format_period_placeholders(bp_curr)
+
             end_time = time.time()
             processing_time = round(end_time - start_time, 2)
             total_processing_time += processing_time
@@ -1612,6 +1689,16 @@ Output STRICTLY as a valid JSON object with no extra text:
             return pd.DataFrame()
 
         df_final = pd.DataFrame(final_results)
+
+        # Apply month placeholder formatting to insight columns
+        insight_columns = [
+            "Internal Insight", "Comparative Insight (Broad)", 
+            "Comparative Insight (Benchmarks)", "Comparative Insight (Peers)", 
+            "Comparative Insight (Peers - Detailed)", "Overall Insight"
+        ]
+        for col in insight_columns:
+            if col in df_final.columns:
+                df_final[col] = df_final[col].apply(self.format_period_placeholders)
 
         # --- TOPIC SUMMARIES ---
         print("\nSynthesizing Topic Summaries...")
