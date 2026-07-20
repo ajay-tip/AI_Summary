@@ -772,7 +772,16 @@ class AISummaryPipeline:
             if not variable_fields:
                 return None, years_context, False
 
-            numeric_fields = [f for f in variable_fields if f and f.lower() != "cpi"]
+            # Extraction logic: handle both {"Fields": [...]} and standard dicts
+            fields_to_check = []
+            if "Fields" in variable_fields:
+                fields_to_check = variable_fields["Fields"]
+            else:
+                fields_to_check = list(variable_fields.keys())
+            
+            if isinstance(fields_to_check, str): fields_to_check = [fields_to_check]
+            
+            numeric_fields = [f for f in fields_to_check if f and f.lower() != "cpi"]
             if not numeric_fields:
                 return None, years_context, False
 
@@ -836,6 +845,7 @@ class AISummaryPipeline:
                 hai = (pl.col("Calc-Median HH Income") / q_inc) * 100
                 return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"])
                 
+            result_df = None
             # If standard relative 12-month change adjusted by CPI
             if "12-month change" in m_lower or ("change" in m_lower and "adjusted by the cpi" in m_lower):
                 if prev_month is None:
@@ -851,7 +861,7 @@ class AISummaryPipeline:
                     diff_latest = mort_latest.join(rent_latest, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     diff_prev = mort_prev.join(rent_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     change_df = diff_latest.join(diff_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                    return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                    result_df = self.combine_roles(change_df, "Change", metric_name, m_type)
                 
                 elif "median list price to median value" in m_lower and "comparison" in m_lower:
                     list_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == "Median Listing Price")).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
@@ -865,7 +875,7 @@ class AISummaryPipeline:
                     diff_latest = list_latest.join(val_latest, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     diff_prev = list_prev.join(val_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     change_df = diff_latest.join(diff_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                    return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                    result_df = self.combine_roles(change_df, "Change", metric_name, m_type)
                 
                 elif "housing affordability index" in m_lower:
                     df_latest = process_hai(latest_month)
@@ -891,9 +901,9 @@ class AISummaryPipeline:
                         df_prev = df_prev.with_columns((pl.col("Value") * (cpi_latest / cpi_prev)).alias("Value"))
 
                 change_df = df_latest.join(df_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                result_df = self.combine_roles(change_df, "Change", metric_name, m_type)
 
-            if "compare estimated mortgage payment to median monthly rent" in m_lower:
+            elif "compare estimated mortgage payment to median monthly rent" in m_lower:
                 df_mort = process_mortgage(latest_month)
                 rent_df = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Monthly Rent").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
                 if rent_df.is_empty() or df_mort.is_empty(): return None, years_context, False
@@ -903,19 +913,20 @@ class AISummaryPipeline:
                 
                 comp_df = df_mort.join(rent_df, on=["NAME", "Role"], how="inner")
                 max_rows = comp_df.unpivot(index=["NAME", "Role"], variable_name="Metric", value_name="Value").sort("Value", descending=True).group_by(["NAME", "Role"]).first()
-                return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+                result_df = self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric")
+                return result_df, years_context, True # Returns immediately for categorical
 
-            if "housing affordability index" in m_lower:
+            elif "housing affordability index" in m_lower:
                 df_hai = process_hai(latest_month)
                 if df_hai.is_empty(): return None, years_context, False
-                return self.combine_roles(df_hai, "Value", metric_name, m_type), years_context, False
+                result_df = self.combine_roles(df_hai, "Value", metric_name, m_type)
 
-            if "estimated mortgage payment" in m_lower:
+            elif "estimated mortgage payment" in m_lower:
                 df_mort = process_mortgage(latest_month)
                 if df_mort.is_empty(): return None, years_context, False
-                return self.combine_roles(df_mort, "Value", metric_name, m_type), years_context, False
+                result_df = self.combine_roles(df_mort, "Value", metric_name, m_type)
                 
-            if "compare median list price to median value" in m_lower:
+            elif "compare median list price to median value" in m_lower:
                 list_price = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == "Median Listing Price")).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
                 value_units = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Value of Owned Units").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
                 if list_price.is_empty() or value_units.is_empty(): return None, years_context, False
@@ -925,9 +936,10 @@ class AISummaryPipeline:
                 
                 comp_df = pl.concat([list_price, value_units])
                 max_rows = comp_df.sort("Value", descending=True).group_by(["NAME", "Role"]).first()
-                return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+                result_df = self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric")
+                return result_df, years_context, True # Returns immediately for categorical
 
-            if "median" in m_lower or "compare" in m_lower:
+            elif "median" in m_lower or "compare" in m_lower:
                 df_latest = df_hai_metric.filter(pl.col("MonthKey") == latest_month).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
                 if "listing price" in m_lower or "value" in m_lower:
                     cpi_latest = self.get_latest_cpi(master_df, is_monthly=True)
@@ -935,7 +947,15 @@ class AISummaryPipeline:
                     if cpi_latest and cpi_current:
                         df_latest = df_latest.with_columns((pl.col("Value") * (cpi_latest / cpi_current)).alias("Value"))
                 
-                return self.combine_roles(df_latest, "Value", metric_name, m_type), years_context, False
+                result_df = self.combine_roles(df_latest, "Value", metric_name, m_type)
+
+            # --- HAI LOOKUP BYPASS ---
+            if result_df:
+                data_src_lower = str(d_source).lower() if d_source else ""
+                if ("mortgagerates" in data_src_lower or "cpi" in data_src_lower):
+                    if 'Focus' not in result_df and 'Benchmark' in result_df and len(result_df['Benchmark']) > 0:
+                        result_df['Focus'] = result_df['Benchmark'][0]
+                return result_df, years_context, False
 
             return None, years_context, False
 
@@ -1130,6 +1150,12 @@ class AISummaryPipeline:
                     parsed[key] = [parsed[key], value]
             else:
                 parsed[key] = value
+
+        if not parsed and cleaned:
+            # Final fallback: Treat as a comma-separated list of strings, removing extra quotes
+            parts = [p.strip().strip('"').strip("'") for p in cleaned.split(',')]
+            if parts:
+                return {"Fields": [p for p in parts if p]}
 
         return parsed
 
