@@ -133,17 +133,31 @@ class AISummaryPipeline:
                 "Calc-Median Monthly Rent": "Calc-Median Monthly Rent",
                 "median_listing_price": "Median Listing Price"
             }
+            # Standardize column names to lowercase for robust mapping
+            col_map = {c.lower(): c for c in df.columns}
+            
+            # Generate MonthKey from various possible sources
+            if "month_date_yyyymm" in col_map:
+                df = df.with_columns(pl.col(col_map["month_date_yyyymm"]).cast(pl.Int64).alias("MonthKey"))
+            elif "year" in col_map and "month" in col_map:
+                df = df.with_columns((pl.col(col_map["year"]).cast(pl.Int64) * 100 + pl.col(col_map["month"]).cast(pl.Int64)).alias("MonthKey"))
+            else:
+                # Fallback: Use Year alone if month is missing
+                df = df.with_columns((pl.col(col_map.get("year", "ACS_Year")).cast(pl.Int64) * 100 + 1).alias("MonthKey"))
+
             df = df.with_columns(
-                pl.col("ACS_Year").cast(pl.Int64).alias("Year"),
+                pl.col(col_map.get("year", "ACS_Year")).cast(pl.Int64).alias("Year"),
                 pl.col("NAME").cast(pl.Utf8).str.strip_chars(),
-                pl.col("Role").cast(pl.Utf8).str.strip_chars(),
-                pl.col("month_date_yyyymm").cast(pl.Int64).alias("MonthKey")
+                pl.col("Role").cast(pl.Utf8).str.strip_chars()
             )
+            
             metric_frames = []
             for raw_field, metric_name in field_map.items():
-                if raw_field in df.columns:
+                # Case-insensitive check
+                actual_col = next((c for c in df.columns if c.lower() == raw_field.lower()), None)
+                if actual_col:
                     metric_frames.append(
-                        df.select(["Year", "NAME", "Role", "MonthKey", pl.col(raw_field).alias("Value")])
+                        df.select(["Year", "NAME", "Role", "MonthKey", pl.col(actual_col).alias("Value")])
                           .with_columns(
                               pl.lit(metric_name).alias("Metric"),
                               pl.lit("HAI").alias("Source"),
@@ -1481,25 +1495,28 @@ Output STRICTLY as a valid JSON object with no extra text:
 
         if not df_hai.is_empty():
             df_hai_std = self.standardize_dataset(df_hai, "HAI")
-            df_hai_std = df_hai_std.filter(pl.col("NAME").is_in(valid_geo_names))
-            source_frames.append(df_hai_std)
             
             # Detect global reporting periods from HAI (Primary anchor for [Current Month] etc.)
-            # We anchor to local geographies to ensure placeholders match local data availability.
-            df_anchor = df_hai_std.filter(pl.col("Role") != "Benchmark")
-            if df_anchor.is_empty(): df_anchor = df_hai_std
+            # We do this BEFORE geography filtering to get the full timeline availability of the dataset.
+            # We filter for non-null Values to avoid picking up 'future' rows with only national lookup data.
+            df_anchor_dates = df_hai_std.filter(pl.col("Value").is_not_null())
+            available_months = df_anchor_dates.select(pl.col("MonthKey")).drop_nulls().unique().sort("MonthKey").to_series().to_list()
             
-            available_months = df_anchor.select(pl.col("MonthKey")).drop_nulls().unique().sort("MonthKey").to_series().to_list()
             if available_months:
                 self.global_latest_month = available_months[-1]
+                print(f"  [System] Global reporting period detected from HAI: {self.global_latest_month}")
+                
                 # Look for exactly 12 months ago
                 target_prev = self.global_latest_month - 100
                 if target_prev in available_months:
                     self.global_prev_month = target_prev
                 else:
-                    # Fallback to the month before the latest if exactly 12 months isn't available
                     prev_cands = [m for m in available_months if m < self.global_latest_month]
                     self.global_prev_month = prev_cands[-1] if prev_cands else None
+            
+            # Now filter for requested geographies
+            df_hai_std = df_hai_std.filter(pl.col("NAME").is_in(valid_geo_names))
+            source_frames.append(df_hai_std)
 
         if not df_cpi.is_empty():
             source_frames.append(self.standardize_dataset(df_cpi, "CPI"))
