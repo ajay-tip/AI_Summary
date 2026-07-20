@@ -776,26 +776,36 @@ class AISummaryPipeline:
             if not numeric_fields:
                 return None, years_context, False
 
-            hai_metrics = [f for f in numeric_fields if f in master_df.select(pl.col("Metric")).to_series().to_list()]
-            if not hai_metrics:
-                hai_metrics = numeric_fields
-
-            df_hai_metric = master_df.filter(pl.col("Metric").is_in(hai_metrics))
-            if df_hai_metric.is_empty():
+            # Anchor periods to the HAI metrics (Listing Price, Rent, Income) which have local data.
+            # National lookup metrics (Mortgage, CPI) should not drive the period selection.
+            hai_anchor_metrics = ["Median Listing Price", "Calc-Median Monthly Rent", "Calc-Median HH Income", "Calc-Median Value of Owned Units"]
+            df_anchor = master_df.filter(pl.col("Metric").is_in(hai_anchor_metrics) & (pl.col("Role") != "Benchmark"))
+            
+            if df_anchor.is_empty():
+                # Fallback to the whole set if no anchor metrics found
+                df_anchor = master_df.filter(pl.col("Metric").is_in(numeric_fields))
+            
+            available_months = df_anchor.select(pl.col("MonthKey")).drop_nulls().unique().sort("MonthKey").to_series().to_list()
+            if not available_months:
                 return None, years_context, False
-
-            latest_month = df_hai_metric.select(pl.col("MonthKey")).drop_nulls().unique().sort("MonthKey").to_series().to_list()
-            if not latest_month:
-                return None, years_context, False
-            latest_month = latest_month[-1]
+            
+            latest_month = available_months[-1]
             latest_year = latest_month // 100
             years_context["latest"] = str(latest_year)
 
+            # Look for a month exactly 12 months ago
             prev_month = latest_month - 100
-            if df_hai_metric.filter(pl.col("MonthKey") == prev_month).is_empty():
-                prev_month = None
-            else:
+            if prev_month not in available_months:
+                prev_month_candidates = [m for m in available_months if m < latest_month]
+                prev_month = prev_month_candidates[-1] if prev_month_candidates else None
+            
+            if prev_month:
                 years_context["prev"] = str(prev_month // 100)
+            
+            # Now filter the main df for processing
+            df_hai_metric = master_df.filter(pl.col("Metric").is_in(numeric_fields))
+            if df_hai_metric.is_empty():
+                return None, years_context, False
                 
             def process_mortgage(month_target):
                 # Treated as a national lookup value (like CPI)
@@ -874,7 +884,7 @@ class AISummaryPipeline:
                     df_latest = process_mortgage(latest_month)
                     df_prev = process_mortgage(prev_month)
                 else:
-                    field = hai_metrics[0]
+                    field = numeric_fields[0]
                     df_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
                     df_prev = df_hai_metric.filter((pl.col("MonthKey") == prev_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
 
@@ -935,7 +945,16 @@ class AISummaryPipeline:
                     if cpi_latest and cpi_current:
                         df_latest = df_latest.with_columns((pl.col("Value") * (cpi_latest / cpi_current)).alias("Value"))
                 
-                return self.combine_roles(df_latest, "Value", metric_name, m_type), years_context, False
+                result_dict = self.combine_roles(df_latest, "Value", metric_name, m_type)
+            else:
+                result_dict = None
+
+            if result_dict:
+                # Apply Lookup Bypass for HAI sources if needed
+                if ("mortgagerates" in data_source_lower or "cpi" in data_source_lower):
+                    if 'Focus' not in result_dict and 'Benchmark' in result_dict and len(result_dict['Benchmark']) > 0:
+                        result_dict['Focus'] = result_dict['Benchmark'][0]
+                return result_dict, years_context, False
 
             return None, years_context, False
 
