@@ -57,6 +57,10 @@ class AISummaryPipeline:
         self.project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
         self.location = location or os.environ.get("GOOGLE_CLOUD_LOCATION")
         self.gemini_client = None
+        
+        # Period tracking for dynamic placeholders (anchored to primary data source)
+        self.global_latest_month = None
+        self.global_prev_month = None
 
         if self.mode == "gemini":
             if not HAS_GENAI:
@@ -235,17 +239,27 @@ class AISummaryPipeline:
     def format_period_placeholders(self, text):
         """
         Replaces bracketed month placeholders with actual formatted dates.
-        Example: [Current Month] -> July 2026
-                 [Previous-12 Month] -> July 2025
+        Example: [Current Month] -> April 2026
+                 [Previous-12 Month] -> April 2025
         """
         if not isinstance(text, str) or not text:
             return text
 
-        # Define the current date (or set this to your specific reporting date)
-        current_date = datetime.now()
+        # Use global keys set from the HAI data if available, otherwise fallback to system time
+        if self.global_latest_month:
+            year = self.global_latest_month // 100
+            month = self.global_latest_month % 100
+            current_date = datetime(year, month, 1)
+        else:
+            current_date = datetime.now()
         
-        # Calculate previous 12 months
-        previous_12_date = current_date - relativedelta(months=12)
+        if self.global_prev_month:
+            year = self.global_prev_month // 100
+            month = self.global_prev_month % 100
+            previous_12_date = datetime(year, month, 1)
+        else:
+            # Fallback: exactly 12 months before current
+            previous_12_date = current_date - relativedelta(months=12)
 
         # Format dates as "Month Year" (e.g., "June 2025")
         current_month_str = current_date.strftime('%B %Y')
@@ -1469,6 +1483,23 @@ Output STRICTLY as a valid JSON object with no extra text:
             df_hai_std = self.standardize_dataset(df_hai, "HAI")
             df_hai_std = df_hai_std.filter(pl.col("NAME").is_in(valid_geo_names))
             source_frames.append(df_hai_std)
+            
+            # Detect global reporting periods from HAI (Primary anchor for [Current Month] etc.)
+            # We anchor to local geographies to ensure placeholders match local data availability.
+            df_anchor = df_hai_std.filter(pl.col("Role") != "Benchmark")
+            if df_anchor.is_empty(): df_anchor = df_hai_std
+            
+            available_months = df_anchor.select(pl.col("MonthKey")).drop_nulls().unique().sort("MonthKey").to_series().to_list()
+            if available_months:
+                self.global_latest_month = available_months[-1]
+                # Look for exactly 12 months ago
+                target_prev = self.global_latest_month - 100
+                if target_prev in available_months:
+                    self.global_prev_month = target_prev
+                else:
+                    # Fallback to the month before the latest if exactly 12 months isn't available
+                    prev_cands = [m for m in available_months if m < self.global_latest_month]
+                    self.global_prev_month = prev_cands[-1] if prev_cands else None
 
         if not df_cpi.is_empty():
             source_frames.append(self.standardize_dataset(df_cpi, "CPI"))
