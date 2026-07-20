@@ -1224,18 +1224,21 @@ class AISummaryPipeline:
         metric_lower = metric_name.lower()
         if "population" not in metric_lower and "pop" not in metric_lower:
             return df
-        pep_filters = []
-        if "Source" in df.columns:
-            pep_filters.append(pl.col("Source").str.to_lowercase().str.contains("pep"))
-        if "Dataset" in df.columns:
-            pep_filters.append(pl.col("Dataset").str.to_lowercase().str.contains("pep"))
-        if not pep_filters:
+
+        source_col = None
+        if "Source" in df.columns: source_col = "Source"
+        elif "Dataset" in df.columns: source_col = "Dataset"
+        
+        if not source_col:
             return df
-        combined_filter = pep_filters[0]
-        if len(pep_filters) > 1:
-            combined_filter = combined_filter | pep_filters[1]
-        df_pep = df.filter(combined_filter)
-        return df_pep if not df_pep.is_empty() else df
+
+        # Add temporary flag for PEP rows
+        df = df.with_columns(
+            is_pep=pl.col(source_col).str.to_lowercase().str.contains("pep").fill_null(False)
+        )
+
+        # For each geography+year, keep the best record (PEP > others)
+        return df.sort("is_pep", descending=True).group_by(["NAME", "Role", "Year"]).first().drop("is_pep")
 
     def is_population_share_metric(self, metric_name: str) -> bool:
         if not isinstance(metric_name, str):
@@ -1250,15 +1253,19 @@ class AISummaryPipeline:
         return "change" in lower and "share" in lower and "broad region" in lower
 
     def calculate_population_share(self, master_df: pl.DataFrame, years_context: dict, metric_name: str, m_type: str, is_change: bool):
-        df_pop = master_df.filter((pl.col("Metric") == "POPESTIMATE") & pl.col("Role").is_in(["Focus", "Broad"]))
+        # Try POPESTIMATE first, then Population
+        df_pop = None
+        for m_try in ["POPESTIMATE", "Population"]:
+            df_try = master_df.filter((pl.col("Metric") == m_try) & pl.col("Role").is_in(["Focus", "Broad"]))
+            if not df_try.is_empty():
+                # Check for overlapping years
+                f_years = set(df_try.filter(pl.col("Role") == "Focus")["Year"].to_list())
+                b_years = set(df_try.filter(pl.col("Role") == "Broad")["Year"].to_list())
+                if f_years.intersection(b_years):
+                    df_pop = df_try
+                    break
         
-        has_focus = not df_pop.filter(pl.col("Role") == "Focus").is_empty()
-        has_broad = not df_pop.filter(pl.col("Role") == "Broad").is_empty()
-        
-        if not (has_focus and has_broad):
-            df_pop = master_df.filter((pl.col("Metric") == "Population") & pl.col("Role").is_in(["Focus", "Broad"]))
-            
-        if df_pop.is_empty():
+        if df_pop is None or df_pop.is_empty():
             return None, years_context, False
 
         focus_name_df = df_pop.filter(pl.col("Role") == "Focus").select("NAME").unique()
