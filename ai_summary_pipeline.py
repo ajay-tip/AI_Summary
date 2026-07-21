@@ -1728,7 +1728,7 @@ Output STRICTLY as a valid JSON object with no extra text:
             
             start_time = time.time()
             
-            geo_data, years_ctx, is_cat = self.calculate_metric_data(master_df, df_pyr, m_name, v_json, m_type, d_source, bp_curr, bp_comp)
+            geo_data, years_ctx, is_cat = self.calculate_metric_data(master_df, df_pyr, m_name, v_json, m_type, d_source, bp_curr=bp_curr, bp_comp=bp_comp)
             
             # Print debug info to trace geo_data contents and roles
             print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
