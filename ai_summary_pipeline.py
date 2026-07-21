@@ -571,7 +571,7 @@ class AISummaryPipeline:
                 
         return geo_data
 
-    def calculate_metric_data(self, master_df, df_pyr, metric_name, variables_json, m_type, d_source=None):
+    def calculate_metric_data(self, master_df, df_pyr, metric_name, variables_json, m_type, d_source=None, bp_curr="", bp_comp=""):
         m_lower = metric_name.lower()
         type_lower = str(m_type).lower()
         
@@ -780,21 +780,87 @@ class AISummaryPipeline:
             if len(years) > 1: years_context["prev"] = str(years[-2])
             latest_year = years[-1]
 
+            is_cpi_source = "cpi" in data_source_lower
+            is_monthly = not ("year" in str(bp_curr).lower() or "annual" in str(bp_curr).lower())
+
             if is_yoy_change:
                 if len(years) < 2: return None, years_context, False
                 prev_year = years[-2]
                 df_l = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
                 df_p = df_metric.filter(pl.col("Year") == prev_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-                if self.get_cpi_ratio(master_df, prev_year, latest_year) is not None:
-                    df_p = df_p.with_columns((pl.col("Value") * float(self.get_cpi_ratio(master_df, prev_year, latest_year))).alias("AdjustedPrev"))
-                    change_df = df_l.join(df_p.select(["NAME", "Role", pl.col("AdjustedPrev").alias("Value")]), on=["NAME", "Role"], how="inner")
+
+                cpi_latest = self.get_cpi_value_for_period(master_df, latest_year, is_monthly)
+                cpi_prev = self.get_cpi_value_for_period(master_df, prev_year, is_monthly)
+
+                cpi_debug = {}
+                if is_cpi_source and cpi_latest is not None and cpi_prev is not None and cpi_prev != 0:
+                    ratio = cpi_latest / cpi_prev
+                    df_p_adj = df_p.with_columns((pl.col("Value") * ratio).alias("Value"))
+                    change_df = df_l.join(df_p_adj, on=["NAME", "Role"], how="inner").with_columns(
+                        (pl.col("Value") - pl.col("Value_right")).alias("Change")
+                    )
+                    cpi_debug = {
+                        "current_period": str(latest_year),
+                        "comparison_period": str(prev_year),
+                        "current_cpi": cpi_latest,
+                        "comparison_cpi": cpi_prev,
+                        "calculation": f"Value ({latest_year}) - (Value ({prev_year}) * ({cpi_latest} / {cpi_prev}))"
+                    }
                 else:
-                    change_df = df_l.join(df_p, on=["NAME", "Role"], how="inner")
-                change_df = change_df.with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                    change_df = df_l.join(df_p, on=["NAME", "Role"], how="inner").with_columns(
+                        (pl.col("Value") - pl.col("Value_right")).alias("Change")
+                    )
+                    cpi_debug = {
+                        "current_period": str(latest_year),
+                        "comparison_period": str(prev_year),
+                        "current_cpi": cpi_latest if cpi_latest else "N/A",
+                        "comparison_cpi": cpi_prev if cpi_prev else "N/A",
+                        "calculation": f"Value ({latest_year}) - Value ({prev_year}) (no CPI adjustment)"
+                    }
+
+                change_df_raw = df_l.join(df_p, on=["NAME", "Role"], how="inner").with_columns(
+                    (pl.col("Value") - pl.col("Value_right")).alias("Change")
+                )
+
+                geo_data_final = self.combine_roles(change_df, "Change", metric_name, m_type)
+                geo_data_raw = self.combine_roles(change_df_raw, "Change", metric_name, m_type)
+                geo_data_final["raw"] = geo_data_raw
+                geo_data_final["cpi_debug_info"] = cpi_debug
+
+                return geo_data_final, years_context, False
             else:
                 df_dedup = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-                return self.combine_roles(df_dedup, "Value", metric_name, m_type), years_context, False
+
+                cpi_latest, cpi_latest_p = self.get_latest_cpi_value(master_df, is_monthly)
+                cpi_current = self.get_cpi_value_for_period(master_df, latest_year, is_monthly)
+
+                cpi_debug = {}
+                if is_cpi_source and cpi_latest is not None and cpi_current is not None and cpi_current != 0:
+                    ratio = cpi_latest / cpi_current
+                    df_dedup_adj = df_dedup.with_columns((pl.col("Value") * ratio).alias("Value"))
+                    cpi_debug = {
+                        "current_period": str(latest_year),
+                        "comparison_period": "N/A",
+                        "current_cpi": cpi_current,
+                        "comparison_cpi": "N/A",
+                        "calculation": f"Value ({latest_year}) * ({cpi_latest} / {cpi_current}) to adjust to {cpi_latest_p} dollars"
+                    }
+                else:
+                    df_dedup_adj = df_dedup
+                    cpi_debug = {
+                        "current_period": str(latest_year),
+                        "comparison_period": "N/A",
+                        "current_cpi": cpi_current if cpi_current else "N/A",
+                        "comparison_cpi": "N/A",
+                        "calculation": f"Value ({latest_year}) (no CPI adjustment)"
+                    }
+
+                geo_data_final = self.combine_roles(df_dedup_adj, "Value", metric_name, m_type)
+                geo_data_raw = self.combine_roles(df_dedup, "Value", metric_name, m_type)
+                geo_data_final["raw"] = geo_data_raw
+                geo_data_final["cpi_debug_info"] = cpi_debug
+
+                return geo_data_final, years_context, False
 
         if any(term in data_source_lower for term in ["hai-cpi table", "hai-cpi table-mortgagerates"]):
             if not variable_fields:
@@ -874,6 +940,9 @@ class AISummaryPipeline:
                 hai = (pl.col("Calc-Median HH Income") / q_inc) * 100
                 return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"])
                 
+            is_cpi_source = "cpi" in data_source_lower
+            is_monthly = not ("year" in str(bp_curr).lower() or "annual" in str(bp_curr).lower())
+
             # If standard relative 12-month change adjusted by CPI
             if "12-month change" in m_lower or ("change" in m_lower and "adjusted by the cpi" in m_lower):
                 if prev_month is None:
@@ -889,7 +958,11 @@ class AISummaryPipeline:
                     diff_latest = mort_latest.join(rent_latest, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     diff_prev = mort_prev.join(rent_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     change_df = diff_latest.join(diff_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                    return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                    
+                    geo_data_final = self.combine_roles(change_df, "Change", metric_name, m_type)
+                    geo_data_final["raw"] = geo_data_final
+                    geo_data_final["cpi_debug_info"] = {"calculation": "Mortgage payment to rent difference change (no CPI adjustment)"}
+                    return geo_data_final, years_context, False
                 
                 elif "median list price to median value" in m_lower and "comparison" in m_lower:
                     list_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == "Median Listing Price")).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
@@ -903,7 +976,11 @@ class AISummaryPipeline:
                     diff_latest = list_latest.join(val_latest, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     diff_prev = list_prev.join(val_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
                     change_df = diff_latest.join(diff_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                    return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                    
+                    geo_data_final = self.combine_roles(change_df, "Change", metric_name, m_type)
+                    geo_data_final["raw"] = geo_data_final
+                    geo_data_final["cpi_debug_info"] = {"calculation": "List price to value difference change (no CPI adjustment)"}
+                    return geo_data_final, years_context, False
                 
                 elif "housing affordability index" in m_lower:
                     df_latest = process_hai(latest_month)
@@ -919,17 +996,45 @@ class AISummaryPipeline:
                 if 'df_latest' not in locals() or 'df_prev' not in locals() or df_latest.is_empty() or df_prev.is_empty():
                     return None, years_context, False
 
-                # CPI ADJUSTMENT to Latest
-                if "adjusted by the cpi" in m_lower or "listing price" in m_lower:
-                    cpi_latest = self.get_latest_cpi(master_df, is_monthly=True)
-                    cpi_current = self.get_cpi_value(master_df, latest_month, is_monthly=True)
-                    cpi_prev = self.get_cpi_value(master_df, prev_month, is_monthly=True)
-                    if cpi_latest and cpi_current and cpi_prev:
-                        df_latest = df_latest.with_columns((pl.col("Value") * (cpi_latest / cpi_current)).alias("Value"))
-                        df_prev = df_prev.with_columns((pl.col("Value") * (cpi_latest / cpi_prev)).alias("Value"))
+                cpi_debug = {}
+                df_latest_adj = df_latest
+                df_prev_adj = df_prev
+                
+                curr_period = latest_month if is_monthly else int(latest_month // 100)
+                prev_period = prev_month if is_monthly else int(prev_month // 100)
+                
+                cpi_latest_val, cpi_latest_p = self.get_latest_cpi_value(master_df, is_monthly)
+                cpi_curr_val = self.get_cpi_value_for_period(master_df, curr_period, is_monthly)
+                cpi_prev_val = self.get_cpi_value_for_period(master_df, prev_period, is_monthly)
+                
+                if is_cpi_source and cpi_latest_val is not None and cpi_curr_val is not None and cpi_prev_val is not None and cpi_curr_val != 0 and cpi_prev_val != 0:
+                    df_latest_adj = df_latest.with_columns((pl.col("Value") * (cpi_latest_val / cpi_curr_val)).alias("Value"))
+                    df_prev_adj = df_prev.with_columns((pl.col("Value") * (cpi_latest_val / cpi_prev_val)).alias("Value"))
+                    cpi_debug = {
+                        "current_period": str(curr_period),
+                        "comparison_period": str(prev_period),
+                        "current_cpi": cpi_curr_val,
+                        "comparison_cpi": cpi_prev_val,
+                        "calculation": f"Value ({curr_period}) * ({cpi_latest_val} / {cpi_curr_val}) - Value ({prev_period}) * ({cpi_latest_val} / {cpi_prev_val})"
+                    }
+                else:
+                    cpi_debug = {
+                        "current_period": str(curr_period),
+                        "comparison_period": str(prev_period),
+                        "current_cpi": cpi_curr_val if cpi_curr_val else "N/A",
+                        "comparison_cpi": cpi_prev_val if cpi_prev_val else "N/A",
+                        "calculation": f"Value ({curr_period}) - Value ({prev_period}) (no CPI adjustment)"
+                    }
 
-                change_df = df_latest.join(df_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
-                return self.combine_roles(change_df, "Change", metric_name, m_type), years_context, False
+                change_df_adjusted = df_latest_adj.join(df_prev_adj, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
+                change_df_raw = df_latest.join(df_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
+                
+                geo_data_final = self.combine_roles(change_df_adjusted, "Change", metric_name, m_type)
+                geo_data_raw = self.combine_roles(change_df_raw, "Change", metric_name, m_type)
+                geo_data_final["raw"] = geo_data_raw
+                geo_data_final["cpi_debug_info"] = cpi_debug
+                
+                return geo_data_final, years_context, False
 
             if "compare estimated mortgage payment to median monthly rent" in m_lower:
                 df_mort = process_mortgage(latest_month)
@@ -967,13 +1072,37 @@ class AISummaryPipeline:
 
             if "median" in m_lower or "compare" in m_lower:
                 df_latest = df_hai_metric.filter(pl.col("MonthKey") == latest_month).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
-                if "listing price" in m_lower or "value" in m_lower:
-                    cpi_latest = self.get_latest_cpi(master_df, is_monthly=True)
-                    cpi_current = self.get_cpi_value(master_df, latest_month, is_monthly=True)
-                    if cpi_latest and cpi_current:
-                        df_latest = df_latest.with_columns((pl.col("Value") * (cpi_latest / cpi_current)).alias("Value"))
                 
-                result_dict = self.combine_roles(df_latest, "Value", metric_name, m_type)
+                cpi_debug = {}
+                df_latest_adj = df_latest
+                curr_period = latest_month if is_monthly else int(latest_month // 100)
+                
+                cpi_latest_val, cpi_latest_p = self.get_latest_cpi_value(master_df, is_monthly)
+                cpi_curr_val = self.get_cpi_value_for_period(master_df, curr_period, is_monthly)
+                
+                if is_cpi_source and cpi_latest_val is not None and cpi_curr_val is not None and cpi_curr_val != 0:
+                    ratio = cpi_latest_val / cpi_curr_val
+                    df_latest_adj = df_latest.with_columns((pl.col("Value") * ratio).alias("Value"))
+                    cpi_debug = {
+                        "current_period": str(curr_period),
+                        "comparison_period": "N/A",
+                        "current_cpi": cpi_curr_val,
+                        "comparison_cpi": "N/A",
+                        "calculation": f"Value ({curr_period}) * ({cpi_latest_val} / {cpi_curr_val})"
+                    }
+                else:
+                    cpi_debug = {
+                        "current_period": str(curr_period),
+                        "comparison_period": "N/A",
+                        "current_cpi": cpi_curr_val if cpi_curr_val else "N/A",
+                        "comparison_cpi": "N/A",
+                        "calculation": f"Value ({curr_period}) (no CPI adjustment)"
+                    }
+                
+                result_dict = self.combine_roles(df_latest_adj, "Value", metric_name, m_type)
+                result_dict_raw = self.combine_roles(df_latest, "Value", metric_name, m_type)
+                result_dict["raw"] = result_dict_raw
+                result_dict["cpi_debug_info"] = cpi_debug
             else:
                 result_dict = None
 
@@ -1180,7 +1309,7 @@ class AISummaryPipeline:
 
         return parsed
 
-    def get_cpi_value(self, master_df: pl.DataFrame, period: int, is_monthly: bool = False):
+    def get_cpi_value_for_period(self, master_df: pl.DataFrame, period: int, is_monthly: bool):
         if period is None: return None
         if is_monthly:
             row = master_df.filter((pl.col("Metric") == "CPI (Monthly)") & (pl.col("MonthKey") == period))
@@ -1189,13 +1318,26 @@ class AISummaryPipeline:
         if row.is_empty(): return None
         return float(row.select(pl.col("Value").mean()).item())
 
-    def get_latest_cpi(self, master_df: pl.DataFrame, is_monthly: bool = False):
+    def get_latest_cpi_value(self, master_df: pl.DataFrame, is_monthly: bool):
         if is_monthly:
             rows = master_df.filter(pl.col("Metric") == "CPI (Monthly)").drop_nulls(subset=["MonthKey"]).sort("MonthKey", descending=True)
+            if rows.is_empty(): return None, None
+            val = float(rows.select(pl.col("Value")).first().item())
+            p = int(rows.select(pl.col("MonthKey")).first().item())
+            return val, p
         else:
             rows = master_df.filter(pl.col("Metric") == "Average CPI (Annual)").drop_nulls(subset=["Year"]).sort("Year", descending=True)
-        if rows.is_empty(): return None
-        return float(rows.select(pl.col("Value")).first().item())
+            if rows.is_empty(): return None, None
+            val = float(rows.select(pl.col("Value")).first().item())
+            p = int(rows.select(pl.col("Year")).first().item())
+            return val, p
+
+    def get_cpi_value(self, master_df: pl.DataFrame, period: int, is_monthly: bool = False):
+        return self.get_cpi_value_for_period(master_df, period, is_monthly)
+
+    def get_latest_cpi(self, master_df: pl.DataFrame, is_monthly: bool = False):
+        val, _ = self.get_latest_cpi_value(master_df, is_monthly)
+        return val
 
     def get_average_cpi(self, master_df: pl.DataFrame, year: int):
         return self.get_cpi_value(master_df, year, is_monthly=False)
@@ -1586,20 +1728,17 @@ Output STRICTLY as a valid JSON object with no extra text:
             
             start_time = time.time()
             
-            geo_data, years_ctx, is_cat = self.calculate_metric_data(master_df, df_pyr, m_name, v_json, m_type, d_source)
+            geo_data, years_ctx, is_cat = self.calculate_metric_data(master_df, df_pyr, m_name, v_json, m_type, d_source, bp_curr, bp_comp)
             
             # Print debug info to trace geo_data contents and roles
             print(f"  [Debug] Metric: '{m_name}' | Available Roles in geo_data: {list(geo_data.keys()) if geo_data else 'None'}")
             
             if not geo_data or 'Focus' not in geo_data:
-                # FIX: Only allow Broad→Focus promotion for 'components' data source metrics.
-                # For these, the broad geography IS the intended subject (e.g. county-level
-                # components of change). For all other sources (ACS, pyramid, HAI), the
-                # Focus geography is expected to be present. If it's missing it means the
-                # dataset does not cover the focus geography — skip the metric rather than
-                # silently substituting the broad geography.
+                # STRICT FALLBACK RULE: Only allow Broad fallback if the Focus geography is COMPLETELY absent in components dataset
                 data_src_lower_check = str(d_source).lower() if d_source else ""
-                allow_broad_fallback = "component" in data_src_lower_check
+                is_comp_source = "component" in data_src_lower_check
+                focus_absent_in_comp = df_comp_std.filter(pl.col("Role") == "Focus").is_empty() if not df_comp.is_empty() else True
+                allow_broad_fallback = is_comp_source and focus_absent_in_comp
                 if allow_broad_fallback and geo_data and 'Broad' in geo_data and len(geo_data['Broad']) > 0:
                     geo_data['Focus'] = geo_data['Broad'][0]
                     geo_data['Broad'] = []  # Omit broad summary to avoid redundancy
@@ -1653,23 +1792,60 @@ Output STRICTLY as a valid JSON object with no extra text:
                 i_per = "N/A"
                 i_per_det = "N/A"
             
-            # --- BUILD MATH CONTEXT BLOCK for LLM ---
-            # Collect all the key quantitative facts from the deterministic layer
-            math_context_parts = [f"Focus value: {self.format_value(fv_val, m_name, m_type)}"]
+            # --- BUILD 3 MATH CONTEXT COLUMNS ---
+            geo_data_raw = geo_data.get("raw", geo_data)
+            cpi_debug_info = geo_data.get("cpi_debug_info", {})
+
+            # 1. Final (adjusted as necessary, passed to the AI model)
+            math_context_parts_final = [f"Focus value: {self.format_value(fv_val, m_name, m_type)}"]
             for g in broad_geos:
                 if g.get('Raw_Value') is not None:
                     diff_v = fv_val - g['Raw_Value'] if fv_val is not None else None
                     if diff_v is not None:
                         diff_fmt = f"{abs(diff_v):.1f} pp" if ("percent" in m_type.lower() or "rate" in m_type.lower()) else self.format_value(abs(diff_v), m_name, m_type)
-                        math_context_parts.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
+                        math_context_parts_final.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
             for g in bench_geos:
                 if g.get('Raw_Value') is not None:
                     diff_v = fv_val - g['Raw_Value'] if fv_val is not None else None
                     if diff_v is not None:
                         diff_fmt = f"{abs(diff_v):.1f} pp" if ("percent" in m_type.lower() or "rate" in m_type.lower()) else self.format_value(abs(diff_v), m_name, m_type)
-                        math_context_parts.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
-            math_context = "; ".join(math_context_parts)
+                        math_context_parts_final.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
+            math_context = "; ".join(math_context_parts_final)
             math_debug_logs.append(f"Math Context: {math_context}")
+
+            # 2. Raw (nominal/unadjusted)
+            fv_val_raw = geo_data_raw.get('Focus', {}).get('Raw_Value', fv_val) if 'Focus' in geo_data_raw else fv_val
+            broad_geos_raw = [g for g in geo_data_raw.get('Broad', []) if not self.is_missing_value(g.get('Raw_Value'))]
+            bench_geos_raw = geo_data_raw.get('Benchmark', [])
+            
+            math_context_parts_raw = [f"Focus value: {self.format_value(fv_val_raw, m_name, m_type)}"]
+            for g in broad_geos_raw:
+                if g.get('Raw_Value') is not None:
+                    diff_v = fv_val_raw - g['Raw_Value'] if fv_val_raw is not None else None
+                    if diff_v is not None:
+                        diff_fmt = f"{abs(diff_v):.1f} pp" if ("percent" in m_type.lower() or "rate" in m_type.lower()) else self.format_value(abs(diff_v), m_name, m_type)
+                        math_context_parts_raw.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
+            for g in bench_geos_raw:
+                if g.get('Raw_Value') is not None:
+                    diff_v = fv_val_raw - g['Raw_Value'] if fv_val_raw is not None else None
+                    if diff_v is not None:
+                        diff_fmt = f"{abs(diff_v):.1f} pp" if ("percent" in m_type.lower() or "rate" in m_type.lower()) else self.format_value(abs(diff_v), m_name, m_type)
+                        math_context_parts_raw.append(f"{g['Name']}: {self.format_value(g['Raw_Value'], m_name, m_type)} (diff: {'+' if diff_v > 0 else '-'}{diff_fmt})")
+            math_context_raw = "; ".join(math_context_parts_raw)
+
+            # 3. Calculation Debug
+            calc_parts = []
+            if "current_period" in cpi_debug_info:
+                calc_parts.append(f"Current Period: {cpi_debug_info['current_period']}")
+            if "comparison_period" in cpi_debug_info and cpi_debug_info["comparison_period"] != "N/A":
+                calc_parts.append(f"Comparison Period: {cpi_debug_info['comparison_period']}")
+            if "current_cpi" in cpi_debug_info:
+                calc_parts.append(f"Current CPI: {cpi_debug_info['current_cpi']}")
+            if "comparison_cpi" in cpi_debug_info and cpi_debug_info["comparison_cpi"] != "N/A":
+                calc_parts.append(f"Comparison CPI: {cpi_debug_info['comparison_cpi']}")
+            if "calculation" in cpi_debug_info:
+                calc_parts.append(f"Calculation: {cpi_debug_info['calculation']}")
+            math_context_calculation = "; ".join(calc_parts) if calc_parts else "Calculation: Nominal (no CPI adjustment)"
 
             # --- LLM SYNTHESIS FOR OVERALL INSIGHT ---
             synth_prompt = f"""You are an executive data analyst. Synthesize the facts below about '{m_name}' into ONE professional, fluid summary sentence.
@@ -1707,7 +1883,6 @@ Output STRICTLY as a valid JSON object with no extra text:
             bench_names = [g["Name"] for g in bench_geos] if bench_geos else []
             peer_names = [g["Name"] for g in peer_geos] if peer_geos else []
             valid_geos_over = list({g for g in [fn] + broad_names + bench_names + peer_names + all_peer_names if g})
-            # Single unified pass: fix both capitalization and geography casing
             i_over = self.apply_capitalization_layer(i_over_raw, valid_geos_over)
             
             if cy:
@@ -1717,7 +1892,6 @@ Output STRICTLY as a valid JSON object with no extra text:
                 bp_comp = bp_comp.replace("[Previous Year]", py)
                 bp_curr = bp_curr.replace("[Previous Year]", py)
 
-            # Replace month placeholders
             bp_comp = self.format_period_placeholders(bp_comp)
             bp_curr = self.format_period_placeholders(bp_curr)
 
@@ -1749,7 +1923,9 @@ Output STRICTLY as a valid JSON object with no extra text:
                 "Comparative Insight (Peers)": i_per,
                 "Comparative Insight (Peers - Detailed)": i_per_det,
                 "Overall Insight": i_over,
-                "Math/Prompt Debug": " | ".join(math_debug_logs) if math_debug_logs else "Deterministic Extraction (Cyborg Arch)"
+                "Math Debug - Final": math_context,
+                "Math Debug - Raw": math_context_raw,
+                "Math Debug - Calculation": math_context_calculation
             })
 
         if metrics_processed == 0: 
@@ -1781,9 +1957,9 @@ Output STRICTLY as a valid JSON object with no extra text:
 
             # Also pass the per-metric math debug for numerical grounding in the topic prompt
             topic_math = "\n".join([
-                f"- {row2['Metric']}: {row2['Math/Prompt Debug']}"
+                f"- {row2['Metric']}: {row2['Math Debug - Final']}"
                 for _, row2 in group.iterrows()
-                if row2.get('Math/Prompt Debug') and row2['Math/Prompt Debug'] != "Deterministic Extraction (Cyborg Arch)"
+                if row2.get('Math Debug - Final') and row2['Math Debug - Final'] != "Deterministic Extraction (Cyborg Arch)"
             ])
             topic_prompt = f"""You are an executive data analyst writing a single cohesive summary paragraph for the topic: {topic}.
 Synthesize the following insights into a smooth, professional paragraph.
@@ -1845,7 +2021,8 @@ Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "you
             "Data Source", "Variables", "Metric", "Metric Type", "Description", 
             "Internal Insight", "Comparative Insight (Broad)", 
             "Comparative Insight (Benchmarks)", "Comparative Insight (Peers)", 
-            "Comparative Insight (Peers - Detailed)", "Overall Insight", "Math/Prompt Debug"
+            "Comparative Insight (Peers - Detailed)", "Overall Insight", 
+            "Math Debug - Final", "Math Debug - Raw", "Math Debug - Calculation"
         ]
         df_final = df_final[[col for col in columns_ordered if col in df_final.columns]]
         
