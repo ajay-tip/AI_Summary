@@ -941,8 +941,8 @@ class AISummaryPipeline:
                 r = (m_val / 100.0) / 12.0
                 n = 360
                 payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
-                q_inc = payment * 12 * 4
-                hai = (pl.col("Calc-Median HH Income") / q_inc) * 100
+                q_inc = (payment * 12) / 0.2
+                hai = pl.col("Calc-Median HH Income") / q_inc
                 return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"])
                 
             is_cpi_source = "cpi" in data_source_lower
@@ -1030,15 +1030,15 @@ class AISummaryPipeline:
                 cpi_curr_val = self.get_cpi_value_for_period(master_df, curr_period, is_monthly)
                 cpi_prev_val = self.get_cpi_value_for_period(master_df, prev_period, is_monthly)
                 
-                if is_cpi_source and cpi_latest_val is not None and cpi_curr_val is not None and cpi_prev_val is not None and cpi_curr_val != 0 and cpi_prev_val != 0:
-                    df_latest_adj = df_latest.with_columns((pl.col("Value") * (cpi_latest_val / cpi_curr_val)).alias("Value"))
-                    df_prev_adj = df_prev.with_columns((pl.col("Value") * (cpi_latest_val / cpi_prev_val)).alias("Value"))
+                if is_cpi_source and cpi_curr_val is not None and cpi_prev_val is not None and cpi_curr_val != 0 and cpi_prev_val != 0:
+                    df_latest_adj = df_latest
+                    df_prev_adj = df_prev.with_columns((pl.col("Value") * (cpi_curr_val / cpi_prev_val)).alias("Value"))
                     cpi_debug = {
                         "current_period": str(curr_period),
                         "comparison_period": str(prev_period),
                         "current_cpi": cpi_curr_val,
                         "comparison_cpi": cpi_prev_val,
-                        "calculation": f"Value ({curr_period}) * ({cpi_latest_val} / {cpi_curr_val}) - Value ({prev_period}) * ({cpi_latest_val} / {cpi_prev_val})"
+                        "calculation": f"Value ({curr_period}) - (Value ({prev_period}) * ({cpi_curr_val} / {cpi_prev_val}))"
                     }
                 else:
                     cpi_debug = {
@@ -1882,6 +1882,12 @@ Output STRICTLY as a valid JSON object with no extra text:
             8. Use lowercase for demographic/category terms (e.g. "female", "natural change", "45-54 age group").
             9. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the numbers show that", "a closer look shows that"). State the analytical facts directly and declaratively.
             10. The output must be crisp, professional, objective, and directly insertable into an executive-level dashboard card.
+            11. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
+            12. When stating cumulative changes (e.g., population growth), you must explicitly state the baseline year the change is measured from (e.g., 'Since 1990...').
+            13. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
+            14. Ensure all comparative sentences are fully resolved and complete.
+            15. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
+            16. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
             
             Output STRICTLY as a valid JSON object: {{ "overall_insight": "your sentence here" }}
             """
@@ -1989,6 +1995,12 @@ RULES:
 6. Do not invent new geography names or project-specific place names beyond the provided list.
 7. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the data shows that", "it is important to note that"). State the analytical facts directly and declaratively.
 8. The output must be polished, objective, and directly insertable into an executive-level dashboard topic overview card.
+9. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
+10. When stating cumulative changes (e.g., population growth), you must explicitly state the baseline year the change is measured from (e.g., 'Since 1990...').
+11. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
+12. Ensure all comparative sentences are fully resolved and complete.
+13. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
+14. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
 
 Output STRICTLY as a valid JSON object formatted as: {{ "topic_summary": "your paragraph here" }}"""
             
@@ -2017,6 +2029,12 @@ RULES:
 5. Do not invent or add project-specific place names beyond the provided list.
 6. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the data shows that", "it is important to note that"). State the analytical facts directly and declaratively.
 7. The output must be polished, objective, and directly insertable into an executive-level dashboard home-screen summary widget.
+8. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
+9. When stating cumulative changes (e.g., population growth), you must explicitly state the baseline year the change is measured from (e.g., 'Since 1990...').
+10. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
+11. Ensure all comparative sentences are fully resolved and complete.
+12. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
+13. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
 
 Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "your executive summary here" }}"""
 
