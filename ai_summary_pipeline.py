@@ -1358,14 +1358,14 @@ class AISummaryPipeline:
         if is_monthly:
             rows = master_df.filter(pl.col("Metric") == "CPI (Monthly)").drop_nulls(subset=["MonthKey"]).sort("MonthKey", descending=True)
             if rows.is_empty(): return None, None
-            val = float(rows.select(pl.col("Value")).first().item())
-            p = int(rows.select(pl.col("MonthKey")).first().item())
+            val = float(rows.select(pl.col("Value")).head(1).item())
+            p = int(rows.select(pl.col("MonthKey")).head(1).item())
             return val, p
         else:
             rows = master_df.filter(pl.col("Metric") == "Average CPI (Annual)").drop_nulls(subset=["Year"]).sort("Year", descending=True)
             if rows.is_empty(): return None, None
-            val = float(rows.select(pl.col("Value")).first().item())
-            p = int(rows.select(pl.col("Year")).first().item())
+            val = float(rows.select(pl.col("Value")).head(1).item())
+            p = int(rows.select(pl.col("Year")).head(1).item())
             return val, p
 
     def get_cpi_value(self, master_df: pl.DataFrame, period: int, is_monthly: bool = False):
@@ -1402,7 +1402,7 @@ class AISummaryPipeline:
         else:
             rows = master_df.filter(pl.col("Metric") == "Monthly Avg 30yr").drop_nulls(subset=["Year"]).sort("Year", descending=True)
         if rows.is_empty(): return None
-        return float(rows.select(pl.col("Value")).first().item())
+        return float(rows.select(pl.col("Value")).head(1).item())
 
     def adjust_to_current_dollars(self, value, from_year: int, to_year: int, master_df: pl.DataFrame):
         if value is None:
