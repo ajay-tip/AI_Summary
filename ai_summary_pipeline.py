@@ -781,7 +781,25 @@ class AISummaryPipeline:
             latest_year = years[-1]
 
             is_cpi_source = "cpi" in data_source_lower
-            is_monthly = not ("year" in str(bp_curr).lower() or "annual" in str(bp_curr).lower())
+            
+            # Robust monthly vs annual detection:
+            # If the source is ACS, it's always annual (not monthly).
+            # Otherwise, check if bp_curr is a 4-digit number (year) or contains year/annual.
+            is_monthly = True
+            if "acs" in data_source_lower:
+                is_monthly = False
+            else:
+                bp_curr_str = str(bp_curr).lower().strip()
+                if "year" in bp_curr_str or "annual" in bp_curr_str:
+                    is_monthly = False
+                else:
+                    # Check if it's a 4-digit integer like 2024
+                    try:
+                        val = int(float(bp_curr_str))
+                        if 1900 <= val <= 2100:
+                            is_monthly = False
+                    except ValueError:
+                        pass
 
             if is_yoy_change:
                 if len(years) < 2: return None, years_context, False
@@ -941,7 +959,25 @@ class AISummaryPipeline:
                 return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"])
                 
             is_cpi_source = "cpi" in data_source_lower
-            is_monthly = not ("year" in str(bp_curr).lower() or "annual" in str(bp_curr).lower())
+            
+            # Robust monthly vs annual detection:
+            # If the source is ACS, it's always annual (not monthly).
+            # Otherwise, check if bp_curr is a 4-digit number (year) or contains year/annual.
+            is_monthly = True
+            if "acs" in data_source_lower:
+                is_monthly = False
+            else:
+                bp_curr_str = str(bp_curr).lower().strip()
+                if "year" in bp_curr_str or "annual" in bp_curr_str:
+                    is_monthly = False
+                else:
+                    # Check if it's a 4-digit integer like 2024
+                    try:
+                        val = int(float(bp_curr_str))
+                        if 1900 <= val <= 2100:
+                            is_monthly = False
+                    except ValueError:
+                        pass
 
             # If standard relative 12-month change adjusted by CPI
             if "12-month change" in m_lower or ("change" in m_lower and "adjusted by the cpi" in m_lower):
