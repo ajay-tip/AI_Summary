@@ -848,30 +848,17 @@ class AISummaryPipeline:
                 return geo_data_final, years_context, False
             else:
                 df_dedup = df_metric.filter(pl.col("Year") == latest_year).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
-
-                cpi_latest, cpi_latest_p = self.get_latest_cpi_value(master_df, is_monthly)
                 cpi_current = self.get_cpi_value_for_period(master_df, latest_year, is_monthly)
 
-                cpi_debug = {}
-                if is_cpi_source and cpi_latest is not None and cpi_current is not None and cpi_current != 0:
-                    ratio = cpi_latest / cpi_current
-                    df_dedup_adj = df_dedup.with_columns((pl.col("Value") * ratio).alias("Value"))
-                    cpi_debug = {
-                        "current_period": str(latest_year),
-                        "comparison_period": "N/A",
-                        "current_cpi": cpi_current,
-                        "comparison_cpi": "N/A",
-                        "calculation": f"Value ({latest_year}) * ({cpi_latest} / {cpi_current}) to adjust to {cpi_latest_p} dollars"
-                    }
-                else:
-                    df_dedup_adj = df_dedup
-                    cpi_debug = {
-                        "current_period": str(latest_year),
-                        "comparison_period": "N/A",
-                        "current_cpi": cpi_current if cpi_current else "N/A",
-                        "comparison_cpi": "N/A",
-                        "calculation": f"Value ({latest_year}) (no CPI adjustment)"
-                    }
+                # Keep single-year metrics in their nominal dollars for that specific year
+                df_dedup_adj = df_dedup
+                cpi_debug = {
+                    "current_period": str(latest_year),
+                    "comparison_period": "N/A",
+                    "current_cpi": cpi_current if cpi_current else "N/A",
+                    "comparison_cpi": "N/A",
+                    "calculation": f"Value ({latest_year}) (Nominal - no CPI adjustment for single-year metric)"
+                }
 
                 geo_data_final = self.combine_roles(df_dedup_adj, "Value", metric_name, m_type)
                 geo_data_raw = self.combine_roles(df_dedup, "Value", metric_name, m_type)
@@ -1109,31 +1096,18 @@ class AISummaryPipeline:
             if "median" in m_lower or "compare" in m_lower:
                 df_latest = df_hai_metric.filter(pl.col("MonthKey") == latest_month).group_by(["NAME", "Role", "Metric"]).agg(pl.col("Value").mean())
                 
-                cpi_debug = {}
-                df_latest_adj = df_latest
                 curr_period = latest_month if is_monthly else int(latest_month // 100)
-                
-                cpi_latest_val, cpi_latest_p = self.get_latest_cpi_value(master_df, is_monthly)
                 cpi_curr_val = self.get_cpi_value_for_period(master_df, curr_period, is_monthly)
                 
-                if is_cpi_source and cpi_latest_val is not None and cpi_curr_val is not None and cpi_curr_val != 0:
-                    ratio = cpi_latest_val / cpi_curr_val
-                    df_latest_adj = df_latest.with_columns((pl.col("Value") * ratio).alias("Value"))
-                    cpi_debug = {
-                        "current_period": str(curr_period),
-                        "comparison_period": "N/A",
-                        "current_cpi": cpi_curr_val,
-                        "comparison_cpi": "N/A",
-                        "calculation": f"Value ({curr_period}) * ({cpi_latest_val} / {cpi_curr_val})"
-                    }
-                else:
-                    cpi_debug = {
-                        "current_period": str(curr_period),
-                        "comparison_period": "N/A",
-                        "current_cpi": cpi_curr_val if cpi_curr_val else "N/A",
-                        "comparison_cpi": "N/A",
-                        "calculation": f"Value ({curr_period}) (no CPI adjustment)"
-                    }
+                # Keep single-point metrics nominal
+                df_latest_adj = df_latest
+                cpi_debug = {
+                    "current_period": str(curr_period),
+                    "comparison_period": "N/A",
+                    "current_cpi": cpi_curr_val if cpi_curr_val else "N/A",
+                    "comparison_cpi": "N/A",
+                    "calculation": f"Value ({curr_period}) (Nominal - no CPI adjustment for single-period metric)"
+                }
                 
                 result_dict = self.combine_roles(df_latest_adj, "Value", metric_name, m_type)
                 result_dict_raw = self.combine_roles(df_latest, "Value", metric_name, m_type)
