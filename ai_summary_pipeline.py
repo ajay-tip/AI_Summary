@@ -242,8 +242,11 @@ class AISummaryPipeline:
             if val == 0: return "0.0"
             return f"+{val:.1f}" if ("change" in m_lower and val > 0) else f"{val:.1f}"
         elif "affordability index" in m_lower:
-            return f"+{val:.2f}" if ("change" in m_lower and val > 0) else f"{val:.2f}"
-        elif "income" in m_lower or "cost" in m_lower: 
+            precision = 4 if "change" in m_lower else 2
+            return f"+{val:.{precision}f}" if ("change" in m_lower and val > 0) else f"{val:.{precision}f}"
+        elif any(term in m_lower for term in ["income", "cost", "payment", "mortgage", "value of owned units"]): 
+            if "change" in m_lower:
+                return f"+${val:,.0f}" if val > 0 else f"-${abs(val):,.0f}"
             return f"${val:,.0f}"
         elif "change" in m_lower or "net" in m_lower or "mig" in m_lower or "driver" in m_lower: 
             if val == 0: return "0"
@@ -1047,7 +1050,7 @@ class AISummaryPipeline:
                 cpi_curr_val = self.get_cpi_value_for_period(master_df, curr_period, is_monthly)
                 cpi_prev_val = self.get_cpi_value_for_period(master_df, prev_period, is_monthly)
                 
-                if is_cpi_source and cpi_curr_val is not None and cpi_prev_val is not None and cpi_curr_val != 0 and cpi_prev_val != 0:
+                if is_cpi_source and "housing affordability index" not in m_lower and cpi_curr_val is not None and cpi_prev_val is not None and cpi_curr_val != 0 and cpi_prev_val != 0:
                     df_latest_adj = df_latest
                     df_prev_adj = df_prev.with_columns((pl.col("Value") * (cpi_curr_val / cpi_prev_val)).alias("Value"))
                     cpi_debug = {
@@ -1091,17 +1094,26 @@ class AISummaryPipeline:
                 
                 comp_df = df_mort.join(rent_df, on=["NAME", "Role"], how="inner")
                 max_rows = comp_df.unpivot(index=["NAME", "Role"], variable_name="Metric", value_name="Value").sort("Value", descending=True).group_by(["NAME", "Role"]).first()
-                return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
+                res = self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric")
+                if 'm_val_latest' in locals() and m_val_latest is not None:
+                    res["cpi_debug_info"] = {"mortgage_rate_used": m_val_latest}
+                return res, years_context, True
 
             if "housing affordability index" in m_lower:
                 df_hai, m_val_latest = process_hai(latest_month)
                 if df_hai.is_empty(): return None, years_context, False
-                return self.combine_roles(df_hai, "Value", metric_name, m_type), years_context, False
+                res = self.combine_roles(df_hai, "Value", metric_name, m_type)
+                if 'm_val_latest' in locals() and m_val_latest is not None:
+                    res["cpi_debug_info"] = {"mortgage_rate_used": m_val_latest}
+                return res, years_context, False
 
             if "estimated mortgage payment" in m_lower:
                 df_mort, m_val_latest = process_mortgage(latest_month)
                 if df_mort.is_empty(): return None, years_context, False
-                return self.combine_roles(df_mort, "Value", metric_name, m_type), years_context, False
+                res = self.combine_roles(df_mort, "Value", metric_name, m_type)
+                if 'm_val_latest' in locals() and m_val_latest is not None:
+                    res["cpi_debug_info"] = {"mortgage_rate_used": m_val_latest}
+                return res, years_context, False
                 
             if "compare median list price to median value" in m_lower:
                 list_price = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == "Median Listing Price")).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
