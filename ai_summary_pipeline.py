@@ -631,7 +631,7 @@ class AISummaryPipeline:
             
             years = df_pop["Year"].drop_nulls().unique().sort()
             if len(years) > 0: years_context["latest"] = str(years[-1])
-            if len(years) > 1: years_context["prev"] = str(years[-2])
+            if len(years) > 1: years_context["prev"] = "1990"
             
             latest_year = df_pop["Year"].max()
             df_latest = df_pop.filter(pl.col("Year") == latest_year).select(["NAME", "Role", "Value"])
@@ -908,7 +908,7 @@ class AISummaryPipeline:
                 
             def process_mortgage(month_target):
                 # Treated as a national lookup value (like CPI)
-                m_val = self.get_mortgage_value(master_df, month_target, is_monthly=True)
+                m_val = self.get_12_month_avg_mortgage_rate(master_df, month_target)
                 if m_val is None: return pl.DataFrame()
                 
                 # Filter for local metrics only (e.g. Median Listing Price)
@@ -924,7 +924,7 @@ class AISummaryPipeline:
                 
             def process_hai(month_target):
                 # Treated as a national lookup value (like CPI)
-                m_val = self.get_mortgage_value(master_df, month_target, is_monthly=True)
+                m_val = self.get_12_month_avg_mortgage_rate(master_df, month_target)
                 if m_val is None: return pl.DataFrame()
                 
                 # Filter for local metrics only
@@ -942,7 +942,7 @@ class AISummaryPipeline:
                 n = 360
                 payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
                 q_inc = (payment * 12) / 0.2
-                hai = pl.col("Calc-Median HH Income") / q_inc
+                hai = (pl.col("Calc-Median HH Income") / q_inc).round(2)
                 return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"])
                 
             is_cpi_source = "cpi" in data_source_lower
@@ -997,12 +997,10 @@ class AISummaryPipeline:
                     if list_prev.is_empty() or val_prev.is_empty(): return None, years_context, False
                     
                     diff_latest = list_latest.join(val_latest, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
-                    diff_prev = list_prev.join(val_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Value")).select(["NAME", "Role", "Value"])
-                    change_df = diff_latest.join(diff_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
                     
-                    geo_data_final = self.combine_roles(change_df, "Change", metric_name, m_type)
+                    geo_data_final = self.combine_roles(diff_latest, "Value", metric_name, m_type)
                     geo_data_final["raw"] = geo_data_final
-                    geo_data_final["cpi_debug_info"] = {"calculation": "List price to value difference change (no CPI adjustment)"}
+                    geo_data_final["cpi_debug_info"] = {"calculation": "List price to value difference (current period only)"}
                     return geo_data_final, years_context, False
                 
                 elif "housing affordability index" in m_lower:
@@ -1026,7 +1024,6 @@ class AISummaryPipeline:
                 curr_period = latest_month if is_monthly else int(latest_month // 100)
                 prev_period = prev_month if is_monthly else int(prev_month // 100)
                 
-                cpi_latest_val, cpi_latest_p = self.get_latest_cpi_value(master_df, is_monthly)
                 cpi_curr_val = self.get_cpi_value_for_period(master_df, curr_period, is_monthly)
                 cpi_prev_val = self.get_cpi_value_for_period(master_df, prev_period, is_monthly)
                 
@@ -1173,9 +1170,8 @@ class AISummaryPipeline:
         return result_df, years_context, False
 
     # ==========================================
-    # 4. LLM INTERFACE & SYNTHESIS
     # ==========================================
-    def generate_text(self, prompt: str, as_json: bool = False, json_key: str = "overall_insight", max_words: int = 150) -> str:
+    def generate_text(self, prompt: str, as_json: bool = False, json_key: str = "overall_insight", max_words: int = 150, is_rewrite: bool = False) -> str:
         """
         Generates text using the configured model (Gemini or Ollama) with temperature 0.1.
         Includes retry limits/fallbacks and formats/cleans the response as JSON if requested.
@@ -1237,10 +1233,10 @@ class AISummaryPipeline:
                         continue
 
                     val = self.sanitize_text(val.strip())
-                    return self.enforce_word_limit(val, max_words)
+                    return self.enforce_word_limit(val, max_words, is_rewrite)
                 else:
                     resp_clean = self.sanitize_text(resp_clean.strip())
-                    return self.enforce_word_limit(resp_clean, max_words)
+                    return self.enforce_word_limit(resp_clean, max_words, is_rewrite)
 
             except Exception as e:
                 last_error = str(e)
@@ -1270,12 +1266,17 @@ class AISummaryPipeline:
         text = text.encode('ascii', errors='replace').decode('ascii').replace('?', "'")
         return text
 
-    def enforce_word_limit(self, text: str, max_words: int = 150) -> str:
+    def enforce_word_limit(self, text: str, max_words: int = 150, is_rewrite: bool = False) -> str:
         if not isinstance(text, str) or max_words is None:
             return text
         words = text.strip().split()
         if len(words) <= max_words:
             return text.strip()
+            
+        if not is_rewrite:
+            rewrite_prompt = f"Rewrite the following text to be concisely under {max_words} words, retaining the most critical information without losing context. Ensure it is a completely resolved sentence:\n\n{text}"
+            return self.generate_text(rewrite_prompt, as_json=False, max_words=max_words, is_rewrite=True)
+            
         truncated = " ".join(words[:max_words]).strip()
         if truncated and truncated[-1] not in ".!?":
             truncated = truncated.rstrip(' ,;:-') + '.'
@@ -1368,6 +1369,23 @@ class AISummaryPipeline:
             row = master_df.filter((pl.col("Metric") == "Monthly Avg 30yr") & (pl.col("Year") == period))
         if row.is_empty(): return None
         return float(row.select(pl.col("Value").mean()).item())
+
+    def get_12_month_avg_mortgage_rate(self, master_df: pl.DataFrame, period: int):
+        """Fetches the 12-month rolling average for the national 30-year fixed mortgage rate up to the given month."""
+        if period is None: return None
+        y = period // 100
+        m = period % 100
+        periods = []
+        for _ in range(12):
+            periods.append(y * 100 + m)
+            m -= 1
+            if m == 0:
+                m = 12
+                y -= 1
+        rows = master_df.filter((pl.col("Metric") == "Monthly Avg 30yr") & pl.col("MonthKey").is_in(periods))
+        if rows.is_empty(): return None
+        return float(rows.select(pl.col("Value").mean()).item())
+
 
     def get_latest_mortgage_value(self, master_df: pl.DataFrame, is_monthly: bool = True):
         """Fetches the most recent national 30-year fixed mortgage rate."""
@@ -1883,8 +1901,8 @@ Output STRICTLY as a valid JSON object with no extra text:
             9. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the numbers show that", "a closer look shows that"). State the analytical facts directly and declaratively.
             10. The output must be crisp, professional, objective, and directly insertable into an executive-level dashboard card.
             11. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
-            12. When stating cumulative changes (e.g., population growth), you must explicitly state the baseline year the change is measured from (e.g., 'Since 1990...').
-            13. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
+            12. When stating cumulative changes (e.g., population growth), you must explicitly state the comparison period the change is measured from (e.g., 'Between 1990 and 2025...').
+            13. When discussing housing units built in historical periods (e.g., 1970-1989), you must explicitly use the word "percentage" or "share" of the total housing stock (e.g., "The share of housing built between 1970 and 1989 grew..."). Do not mention raw numerical growth, as the physical number of already-built homes cannot organically increase.
             14. Ensure all comparative sentences are fully resolved and complete.
             15. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
             16. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
