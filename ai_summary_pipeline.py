@@ -241,6 +241,8 @@ class AISummaryPipeline:
         elif "age" in m_lower and "largest" not in m_lower:  
             if val == 0: return "0.0"
             return f"+{val:.1f}" if ("change" in m_lower and val > 0) else f"{val:.1f}"
+        elif "affordability index" in m_lower:
+            return f"+{val:.2f}" if ("change" in m_lower and val > 0) else f"{val:.2f}"
         elif "income" in m_lower or "cost" in m_lower: 
             return f"${val:,.0f}"
         elif "change" in m_lower or "net" in m_lower or "mig" in m_lower or "driver" in m_lower: 
