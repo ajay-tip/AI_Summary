@@ -1783,7 +1783,7 @@ Output STRICTLY as a valid JSON object with no extra text:
             
             cy = years_ctx.get("latest", "Current Year")
             py = years_ctx.get("prev", "Previous Year")
-            is_yoy = ("change" in m_name.lower() and "cumulative" not in m_name.lower())
+            is_yoy = ("change" in m_name.lower())
 
             # --- DETERMINISTIC EXTRACTION (CYBORG) ---
             i_int = self.generate_internal_insight(fn, fv_val, m_name, m_type, is_yoy, cy, py, is_cat, f_cat)
@@ -2016,7 +2016,7 @@ RULES:
 7. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the data shows that", "it is important to note that"). State the analytical facts directly and declaratively.
 8. The output must be polished, objective, and directly insertable into an executive-level dashboard topic overview card.
 9. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
-10. When stating cumulative changes (e.g., population growth), you must explicitly state the baseline year the change is measured from (e.g., 'Since 1990...').
+10. When stating cumulative changes (e.g., population growth), you must explicitly state the comparison period the change is measured from (e.g., 'Between 1990 and 2025...').
 11. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
 12. Ensure all comparative sentences are fully resolved and complete.
 13. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
@@ -2050,7 +2050,7 @@ RULES:
 6. AVOID storytelling, conversational, or narrative framing/introductory phrases (e.g., "demographic analysis reveals", "according to the data", "interestingly", "notably", "the data shows that", "it is important to note that"). State the analytical facts directly and declaratively.
 7. The output must be polished, objective, and directly insertable into an executive-level dashboard home-screen summary widget.
 8. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
-9. When stating cumulative changes (e.g., population growth), you must explicitly state the baseline year the change is measured from (e.g., 'Since 1990...').
+9. When stating cumulative changes (e.g., population growth), you must explicitly state the comparison period the change is measured from (e.g., 'Between 1990 and 2025...').
 10. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
 11. Ensure all comparative sentences are fully resolved and complete.
 12. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
