@@ -924,33 +924,33 @@ class AISummaryPipeline:
                 
             def process_mortgage(month_target):
                 # Treated as a national lookup value (like CPI)
-                m_val = self.get_12_month_avg_mortgage_rate(master_df, month_target)
-                if m_val is None: return pl.DataFrame()
+                m_val = self.get_mortgage_value(master_df, month_target, is_monthly=True)
+                if m_val is None: return pl.DataFrame(), None
                 
                 # Filter for local metrics only (e.g. Median Listing Price)
                 comp_df = df_hai_metric.filter((pl.col("MonthKey") == month_target) & (pl.col("Metric") == "Median Listing Price"))
-                if comp_df.is_empty(): return pl.DataFrame()
+                if comp_df.is_empty(): return pl.DataFrame(), m_val
                 
                 # Calculate payment using the national lookup rate broadcasted to local geos
                 P = pl.col("Value") * 0.8
                 r = (m_val / 100.0) / 12.0
                 n = 360
                 payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
-                return comp_df.with_columns(payment.alias("Value")).select(["NAME", "Role", "Value"])
+                return comp_df.with_columns(payment.alias("Value")).select(["NAME", "Role", "Value"]), m_val
                 
             def process_hai(month_target):
                 # Treated as a national lookup value (like CPI)
-                m_val = self.get_12_month_avg_mortgage_rate(master_df, month_target)
-                if m_val is None: return pl.DataFrame()
+                m_val = self.get_mortgage_value(master_df, month_target, is_monthly=True)
+                if m_val is None: return pl.DataFrame(), None
                 
                 # Filter for local metrics only
                 comp_df = df_hai_metric.filter(pl.col("MonthKey") == month_target).filter(pl.col("Metric").is_in(["Median Listing Price", "Calc-Median HH Income"]))
-                if comp_df.is_empty(): return pl.DataFrame()
+                if comp_df.is_empty(): return pl.DataFrame(), m_val
                 
                 # Pivot local metrics
                 df_pivot = comp_df.pivot(values="Value", index=["NAME", "Role"], columns="Metric", aggregate_function="mean")
                 if "Median Listing Price" not in df_pivot.columns or "Calc-Median HH Income" not in df_pivot.columns:
-                    return pl.DataFrame()
+                    return pl.DataFrame(), m_val
                     
                 # Calculate HAI using the national lookup rate broadcasted to local geos
                 P = pl.col("Median Listing Price") * 0.8
@@ -958,8 +958,8 @@ class AISummaryPipeline:
                 n = 360
                 payment = P * (r * (1 + r)**n) / ((1 + r)**n - 1)
                 q_inc = (payment * 12) / 0.2
-                hai = (pl.col("Calc-Median HH Income") / q_inc).round(2)
-                return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"])
+                hai = (pl.col("Calc-Median HH Income") / q_inc).round(4)
+                return df_pivot.with_columns(hai.alias("Value")).select(["NAME", "Role", "Value"]), m_val
                 
             is_cpi_source = "cpi" in data_source_lower
             
@@ -988,8 +988,8 @@ class AISummaryPipeline:
                     return None, years_context, False
                 
                 if "mortgage payment to median monthly rent" in m_lower:
-                    mort_latest = process_mortgage(latest_month)
-                    mort_prev = process_mortgage(prev_month)
+                    mort_latest, m_val_latest = process_mortgage(latest_month)
+                    mort_prev, m_val_prev = process_mortgage(prev_month)
                     rent_latest = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Monthly Rent").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
                     rent_prev = rent_latest # Fallback to latest ACS year if prior isn't dynamically matched
                     if mort_latest.is_empty() or mort_prev.is_empty() or rent_latest.is_empty(): return None, years_context, False
@@ -1001,6 +1001,10 @@ class AISummaryPipeline:
                     geo_data_final = self.combine_roles(change_df, "Change", metric_name, m_type)
                     geo_data_final["raw"] = geo_data_final
                     geo_data_final["cpi_debug_info"] = {"calculation": "Mortgage payment to rent difference change (no CPI adjustment)"}
+                    if 'm_val_latest' in locals() and m_val_latest is not None:
+                        geo_data_final["cpi_debug_info"]["mortgage_rate_used_latest"] = m_val_latest
+                    if 'm_val_prev' in locals() and m_val_prev is not None:
+                        geo_data_final["cpi_debug_info"]["mortgage_rate_used_prev"] = m_val_prev
                     return geo_data_final, years_context, False
                 
                 elif "median list price to median value" in m_lower and "comparison" in m_lower:
@@ -1020,11 +1024,11 @@ class AISummaryPipeline:
                     return geo_data_final, years_context, False
                 
                 elif "housing affordability index" in m_lower:
-                    df_latest = process_hai(latest_month)
-                    df_prev = process_hai(prev_month)
+                    df_latest, m_val_latest = process_hai(latest_month)
+                    df_prev, m_val_prev = process_hai(prev_month)
                 elif "estimated mortgage payment" in m_lower:
-                    df_latest = process_mortgage(latest_month)
-                    df_prev = process_mortgage(prev_month)
+                    df_latest, m_val_latest = process_mortgage(latest_month)
+                    df_prev, m_val_prev = process_mortgage(prev_month)
                 else:
                     field = numeric_fields[0]
                     df_latest = df_hai_metric.filter((pl.col("MonthKey") == latest_month) & (pl.col("Metric") == field)).group_by(["NAME", "Role"]).agg(pl.col("Value").mean())
@@ -1059,8 +1063,13 @@ class AISummaryPipeline:
                         "comparison_period": str(prev_period),
                         "current_cpi": cpi_curr_val if cpi_curr_val else "N/A",
                         "comparison_cpi": cpi_prev_val if cpi_prev_val else "N/A",
-                        "calculation": f"Value ({curr_period}) - Value ({prev_period}) (no CPI adjustment)"
+                        "calculation": "Value (Current) - Value (Previous) [No CPI Adjustment Applied]"
                     }
+                
+                if 'm_val_latest' in locals() and m_val_latest is not None:
+                    cpi_debug["mortgage_rate_used_latest"] = m_val_latest
+                if 'm_val_prev' in locals() and m_val_prev is not None:
+                    cpi_debug["mortgage_rate_used_prev"] = m_val_prev
 
                 change_df_adjusted = df_latest_adj.join(df_prev_adj, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
                 change_df_raw = df_latest.join(df_prev, on=["NAME", "Role"], how="inner").with_columns((pl.col("Value") - pl.col("Value_right")).alias("Change"))
@@ -1073,7 +1082,7 @@ class AISummaryPipeline:
                 return geo_data_final, years_context, False
 
             if "compare estimated mortgage payment to median monthly rent" in m_lower:
-                df_mort = process_mortgage(latest_month)
+                df_mort, m_val_latest = process_mortgage(latest_month)
                 rent_df = df_hai_metric.filter(pl.col("Metric") == "Calc-Median Monthly Rent").drop_nulls("Year").sort("Year").group_by(["NAME", "Role"]).last()
                 if rent_df.is_empty() or df_mort.is_empty(): return None, years_context, False
                 
@@ -1085,12 +1094,12 @@ class AISummaryPipeline:
                 return self.combine_roles(max_rows, "Value", metric_name, m_type, is_categorical=True, category_col="Metric"), years_context, True
 
             if "housing affordability index" in m_lower:
-                df_hai = process_hai(latest_month)
+                df_hai, m_val_latest = process_hai(latest_month)
                 if df_hai.is_empty(): return None, years_context, False
                 return self.combine_roles(df_hai, "Value", metric_name, m_type), years_context, False
 
             if "estimated mortgage payment" in m_lower:
-                df_mort = process_mortgage(latest_month)
+                df_mort, m_val_latest = process_mortgage(latest_month)
                 if df_mort.is_empty(): return None, years_context, False
                 return self.combine_roles(df_mort, "Value", metric_name, m_type), years_context, False
                 
@@ -1919,9 +1928,10 @@ Output STRICTLY as a valid JSON object with no extra text:
             11. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
             12. When stating cumulative changes (e.g., population growth), you must explicitly state the comparison period the change is measured from (e.g., 'Between 1990 and 2025...').
             13. When discussing housing units built in historical periods (e.g., 1970-1989), you must explicitly use the word "percentage" or "share" of the total housing stock (e.g., "The share of housing built between 1970 and 1989 grew..."). Do not mention raw numerical growth, as the physical number of already-built homes cannot organically increase.
-            14. Ensure all comparative sentences are fully resolved and complete.
-            15. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
-            16. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
+            14. Never use internal field names like 'calc-multi-family' in the output. Always translate them into natural, descriptive language (e.g., 'multi-family').
+            15. Ensure all comparative sentences are fully resolved and complete.
+            16. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
+            17. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
             
             Output STRICTLY as a valid JSON object: {{ "overall_insight": "your sentence here" }}
             """
@@ -2032,9 +2042,10 @@ RULES:
 9. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
 10. When stating cumulative changes (e.g., population growth), you must explicitly state the comparison period the change is measured from (e.g., 'Between 1990 and 2025...').
 11. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
-12. Ensure all comparative sentences are fully resolved and complete.
-13. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
-14. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
+12. Never use internal field names like 'calc-multi-family' in the output. Always translate them into natural, descriptive language (e.g., 'multi-family').
+13. Ensure all comparative sentences are fully resolved and complete.
+14. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
+15. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
 
 Output STRICTLY as a valid JSON object formatted as: {{ "topic_summary": "your paragraph here" }}"""
             
@@ -2066,9 +2077,10 @@ RULES:
 8. Do not make absolute size comparisons between a subset and its superset (e.g., stating a state is larger than a city within it). Focus comparisons on proportional shares, per capita metrics, or growth rates.
 9. When stating cumulative changes (e.g., population growth), you must explicitly state the comparison period the change is measured from (e.g., 'Between 1990 and 2025...').
 10. When discussing housing units built in historical periods (e.g., 1970-1989), refer strictly to their 'percentage' or 'share' of the total housing stock, not raw numerical growth, as the physical number of already-built homes cannot organically increase.
-11. Ensure all comparative sentences are fully resolved and complete.
-12. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
-13. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
+11. Never use internal field names like 'calc-multi-family' in the output. Always translate them into natural, descriptive language (e.g., 'multi-family').
+12. Ensure all comparative sentences are fully resolved and complete.
+13. When comparing Median List Price (MLP) and Median Value of Owned Units (MVOU), state only the current difference for the requested month. Do not analyze the year-over-year change of this difference.
+14. Format affordability index insights exactly like this: '...contributing to a housing affordability index of [Insert HAI], compared to [Insert Previous Year HAI] nationally.'
 
 Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "your executive summary here" }}"""
 

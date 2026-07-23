@@ -131,8 +131,8 @@ The estimated monthly mortgage payment assumes a **20% down payment** (financing
 *   `Monthly Payment = P * [ r * (1 + r)^n ] / [ (1 + r)^n - 1 ]`
 
 #### Qualifying Annual Income
-Assumes a standard conservative qualifying debt-to-income (DTI) ratio where mortgage payments are capped at **25% of gross income**:
-*   `Qualifying Income = Monthly Payment * 12 * 4`
+Assumes a standard conservative qualifying debt-to-income (DTI) ratio where mortgage payments are capped at **20% of gross income**:
+*   `Qualifying Income = (Monthly Payment * 12) / 0.2`
 
 #### Housing Affordability Index (HAI)
 The HAI measures whether a family earning the median household income has enough income to qualify for a mortgage on a median-priced home:
