@@ -608,7 +608,14 @@ class AISummaryPipeline:
             if len(years) > 0: years_context["latest"] = str(years[-1])
             if len(years) > 1: years_context["prev"] = str(years[-2])
             
-            if is_cumulative: df_d = df_d.filter(pl.col("Year") >= 1990)
+            try:
+                base_year = int(bp_comp) if bp_comp else 1990
+            except ValueError:
+                import re
+                match = re.search(r'\d{4}', str(bp_comp))
+                base_year = int(match.group()) if match else 1990
+                
+            if is_cumulative: df_d = df_d.filter(pl.col("Year") >= base_year)
             else: df_d = df_d.filter(pl.col("Year") == df_d["Year"].max())
             if df_d.is_empty(): return None, years_context, True
             
@@ -625,21 +632,28 @@ class AISummaryPipeline:
             return self.combine_roles(largest, "Value", metric_name, m_type, is_categorical=True, category_col="Driver_Name"), years_context, True
 
         elif "cumulative" in m_lower and "population" in m_lower and "change" in m_lower:
+            try:
+                base_year = int(bp_comp) if bp_comp else 1990
+            except ValueError:
+                import re
+                match = re.search(r'\d{4}', str(bp_comp))
+                base_year = int(match.group()) if match else 1990
+                
             df_pop = master_df.filter(pl.col("Metric") == "POPESTIMATE")
-            if df_pop.is_empty() or df_pop.filter(pl.col("Year") == 1990).is_empty(): return None, years_context, False
+            if df_pop.is_empty() or df_pop.filter(pl.col("Year") == base_year).is_empty(): return None, years_context, False
             
             # Deduplicate df_pop to prevent cartesian product join duplicate rows
             df_pop = df_pop.group_by(["NAME", "Role", "Year"]).agg(pl.col("Value").mean())
             
             years = df_pop["Year"].drop_nulls().unique().sort()
             if len(years) > 0: years_context["latest"] = str(years[-1])
-            if len(years) > 1: years_context["prev"] = "1990"
+            if len(years) > 1: years_context["prev"] = str(base_year)
             
             latest_year = df_pop["Year"].max()
             df_latest = df_pop.filter(pl.col("Year") == latest_year).select(["NAME", "Role", "Value"])
-            df_1990 = df_pop.filter(pl.col("Year") == 1990).select(["NAME", "Role", "Value"])
+            df_base = df_pop.filter(pl.col("Year") == base_year).select(["NAME", "Role", "Value"])
             
-            change_df = df_latest.join(df_1990, on=["NAME", "Role"], how="inner")
+            change_df = df_latest.join(df_base, on=["NAME", "Role"], how="inner")
             
             if is_percentage_metric:
                 change_df = change_df.with_columns((((pl.col("Value") - pl.col("Value_right")) / pl.col("Value_right")) * 100).alias("Change"))
