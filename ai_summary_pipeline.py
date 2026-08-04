@@ -1624,9 +1624,10 @@ Output STRICTLY as a valid JSON object with no extra text:
         revised = self.generate_text(p, as_json=True, json_key="revised_sentence", max_words=150)
         return self.enforce_sentence_capitalization(revised)
 
-    def apply_quality_control_layer(self, df: pd.DataFrame) -> pd.DataFrame:
+    def apply_quality_control_layer(self, df: pd.DataFrame, valid_geos: list) -> pd.DataFrame:
         """
         Final deterministic quality control pass to enforce rules that the LLM may have missed.
+        Uses the valid geographies list to intelligently apply rules without hardcoding.
         """
         text_cols = [
             "Topic Summary", "Complete Summary", "Internal Insight", 
@@ -1635,19 +1636,41 @@ Output STRICTLY as a valid JSON object with no extra text:
             "Overall Insight", "Math Debug - Final", "Math Debug - Raw", "Math Debug - Calculation"
         ]
         
+        # Extract potential city and state abbreviations from valid_geos (e.g., "Fife, WA")
+        city_to_state = {}
+        exact_geos = set(g.strip() for g in valid_geos if isinstance(g, str))
+        
+        for geo in exact_geos:
+            if "," in geo:
+                parts = geo.split(",")
+                if len(parts) == 2:
+                    city = parts[0].strip()
+                    state = parts[1].strip()
+                    if len(state) == 2 and state.isalpha():
+                        # Only use as fallback if the city isn't also a valid standalone geo
+                        if city not in exact_geos:
+                            city_to_state[city] = state.upper()
+        
         for col in text_cols:
             if col in df.columns:
                 def fix_text(text):
                     if not isinstance(text, str):
                         return text
                     
-                    # Fix WA missing trailing comma when followed by another word
-                    # e.g., "Fife, WA experienced" -> "Fife, WA, experienced"
-                    text = re.sub(r'\b(WA|Wa|wa)\b\s+(?=[a-zA-Z])', r'\1, ', text)
-                    
-                    # Specific fallback for Fife -> Fife, WA
-                    # Only applies if Fife is standing alone.
-                    text = re.sub(r'\bFife\b(?!,\s*[Ww][Aa])', 'Fife, WA', text, flags=re.IGNORECASE)
+                    for city, state in city_to_state.items():
+                        # 1. Fix missing state completely: "Fife" -> "Fife, WA"
+                        # Only applies if City is standing alone without ", ST"
+                        text = re.sub(fr'\b{re.escape(city)}\b(?!,\s*(?i:{re.escape(state)}))', f'{city}, {state}', text)
+                        
+                        # 2. Fix missing trailing comma: "Fife, WA experienced" -> "Fife, WA, experienced"
+                        # Match the "City, ST" exact string and if followed by a space and a word, add a comma.
+                        text = re.sub(fr'\b({re.escape(city)},\s*(?i:{re.escape(state)}))\b\s+(?=[a-zA-Z])', r'\1, ', text)
+                        
+                    return text
+                
+                df[col] = df[col].apply(fix_text)
+                
+        return df
                     
                     return text
                 
@@ -2160,7 +2183,7 @@ Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "you
         print(f"Average Processing Time: {avg_time} seconds/metric (Cyborg Mode)")
         print("="*50 + "\n")
         
-        df_final = self.apply_quality_control_layer(df_final)
+        df_final = self.apply_quality_control_layer(df_final, valid_geo_names)
         df_final.to_csv(output_path, index=False, encoding='utf-8-sig')
         return df_final
 
