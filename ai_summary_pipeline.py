@@ -238,7 +238,7 @@ class AISummaryPipeline:
                 return f"+{val:.1f}%"
             return f"{val:.1f}%"
                 
-        elif "age" in m_lower and "largest" not in m_lower:  
+        elif re.search(r'\bage\b', m_lower) and "largest" not in m_lower:  
             if val == 0: return "0.0"
             return f"+{val:.1f}" if ("change" in m_lower and val > 0) else f"{val:.1f}"
         elif "affordability index" in m_lower:
@@ -1624,6 +1624,37 @@ Output STRICTLY as a valid JSON object with no extra text:
         revised = self.generate_text(p, as_json=True, json_key="revised_sentence", max_words=150)
         return self.enforce_sentence_capitalization(revised)
 
+    def apply_quality_control_layer(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Final deterministic quality control pass to enforce rules that the LLM may have missed.
+        """
+        text_cols = [
+            "Topic Summary", "Complete Summary", "Internal Insight", 
+            "Comparative Insight (Broad)", "Comparative Insight (Benchmarks)", 
+            "Comparative Insight (Peers)", "Comparative Insight (Peers - Detailed)", 
+            "Overall Insight", "Math Debug - Final", "Math Debug - Raw", "Math Debug - Calculation"
+        ]
+        
+        for col in text_cols:
+            if col in df.columns:
+                def fix_text(text):
+                    if not isinstance(text, str):
+                        return text
+                    
+                    # Fix WA missing trailing comma when followed by another word
+                    # e.g., "Fife, WA experienced" -> "Fife, WA, experienced"
+                    text = re.sub(r'\b(WA|Wa|wa)\b\s+(?=[a-zA-Z])', r'\1, ', text)
+                    
+                    # Specific fallback for Fife -> Fife, WA
+                    # Only applies if Fife is standing alone.
+                    text = re.sub(r'\bFife\b(?!,\s*[Ww][Aa])', 'Fife, WA', text, flags=re.IGNORECASE)
+                    
+                    return text
+                
+                df[col] = df[col].apply(fix_text)
+                
+        return df
+
     # ==========================================
     # 5. PIPELINE EXECUTION
     # ==========================================
@@ -2129,6 +2160,7 @@ Output STRICTLY as a valid JSON object formatted as: {{ "complete_summary": "you
         print(f"Average Processing Time: {avg_time} seconds/metric (Cyborg Mode)")
         print("="*50 + "\n")
         
+        df_final = self.apply_quality_control_layer(df_final)
         df_final.to_csv(output_path, index=False, encoding='utf-8-sig')
         return df_final
 
