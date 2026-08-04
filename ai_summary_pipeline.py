@@ -1671,12 +1671,6 @@ Output STRICTLY as a valid JSON object with no extra text:
                 df[col] = df[col].apply(fix_text)
                 
         return df
-                    
-                    return text
-                
-                df[col] = df[col].apply(fix_text)
-                
-        return df
 
     # ==========================================
     # 5. PIPELINE EXECUTION
