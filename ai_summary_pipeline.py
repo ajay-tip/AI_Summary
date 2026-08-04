@@ -245,9 +245,19 @@ class AISummaryPipeline:
             precision = 4 if "change" in m_lower else 2
             return f"+{val:.{precision}f}" if ("change" in m_lower and val > 0) else f"{val:.{precision}f}"
         elif any(term in m_lower for term in ["income", "cost", "payment", "mortgage", "value of owned units"]): 
+            decimals = ".2f" if abs(val) < 10 else ",.0f"
             if "change" in m_lower:
-                return f"+${val:,.0f}" if val > 0 else f"-${abs(val):,.0f}"
-            return f"${val:,.0f}"
+                if val > 0:
+                    return f"+${val:{decimals}}"
+                elif val < 0:
+                    return f"-${abs(val):{decimals}}"
+                else:
+                    return f"${abs(val):{decimals}}"
+            else:
+                if val >= 0:
+                    return f"${val:{decimals}}"
+                else:
+                    return f"-${abs(val):{decimals}}"
         elif "change" in m_lower or "net" in m_lower or "mig" in m_lower or "driver" in m_lower: 
             if val == 0: return "0"
             return f"+{val:,.0f}" if val > 0 else f"{val:,.0f}"
@@ -1597,6 +1607,7 @@ RULES (apply ALL of them):
      "Washington" not "WASHINGTON"; "United States" not "UNITED STATES".
    - Authoritative list of valid geography names for this sentence: {geo_str}.
    - Match each geography in the sentence to the closest name in that list and use that exact casing.
+   - State Abbreviations (e.g., WA): Always include a comma after a state abbreviation if there is another word after it in the sentence (e.g., "In 2024, Fife, WA, experienced...").
 2. CATEGORY / DESCRIPTOR CASING - lowercase unless starting a sentence:
    - Demographic categories, age groups, race/ethnicity labels, and drivers of change are all lowercase.
    - Examples: "natural change", "domestic migration", "45-54 age group", "female", "white alone".
