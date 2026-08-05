@@ -143,17 +143,51 @@ The HAI measures whether a family earning the median household income has enough
 
 ---
 
+## How It Works: The Pipeline Architecture Map
+
+To ensure that the summaries are both beautifully written and 100% mathematically accurate, the pipeline operates in four distinct stages. Here is a simple map of how the data flows from start to finish:
+
+### 1. Data Ingestion (The Foundation)
+*   **What it does:** The script reads the "Blueprint" (your Excel sheet) to know exactly which metrics to generate and which ones to skip. 
+*   **The Rules:** 
+    *   It extracts the **exact geographical names** directly from your input data (e.g., "Fife, WA", "Seattle MSA"). This creates a master list of valid names to prevent the AI from making up or misspelling places later.
+    *   It standardizes all incoming datasets (ACS, Population Pyramid, Housing, etc.) so they can be compared easily.
+
+### 2. The Deterministic Cyborg Engine (The Hard Math)
+*   **What it does:** Before the AI ever sees the data, the code does all the heavy lifting using hardcoded, traditional math. This prevents "AI hallucinations" (where an AI confidently makes up fake numbers).
+*   **The Rules (Formatting & Math):**
+    *   It calculates absolute values, year-over-year changes, and comparative differences between the focus area, its peers, the state, and the nation.
+    *   **Dollar Rounding:** If a dollar value is under $10, it keeps two decimal places (e.g., `$9.32`). If it is $10 or more, it rounds to the nearest whole dollar (e.g., `$15`).
+    *   **Percentages & Demographics:** Rounded neatly to one decimal place (e.g., `31.3%` or `+0.7 percentage points`).
+    *   **Large Numbers:** Values over 1,000,000 are converted to readable formats (e.g., `1.50 million`).
+
+### 3. The AI Synthesizer (The Writer)
+*   **What it does:** The bulletproof math from Step 2 is handed over to the AI (Gemini or Ollama). The AI acts as an executive data analyst, weaving those raw numbers into a fluid, professional paragraph.
+*   **What goes into the AI:** 
+    *   A strict prompt with a 150-word limit.
+    *   The "Math Context" containing the exact, pre-calculated numbers (so the AI doesn't have to do any math itself).
+    *   The authoritative list of valid geography names.
+*   **The Rules (Copyediting):**
+    *   Geography names must use Title Case and match the input list exactly (e.g., "Seattle MSA", never "SEATTLE MSA").
+    *   Demographic categories and drivers of change (like "natural change", "female", "white alone") must be lowercase, unless they start a sentence.
+    *   Internal database column names (like `calc-multi-family`) must be translated into natural phrasing.
+    *   No conversational filler ("Interestingly, the data shows..."). It must be declarative and professional.
+
+### 4. The Quality Control Layer (The Safety Net)
+*   **What it does:** Even with strict instructions, AI can sometimes make grammatical typos. This final, hardcoded layer scans the AI's finished text right before exporting to forcefully correct any slip-ups.
+*   **The Rules (Text Enforcement):**
+    *   **Orphaned City Fix:** If the AI writes a standalone city name (like "Fife") but the valid input list says it should be "Fife, WA", the script automatically appends the state.
+    *   **State Trailing Comma Fix:** If a state abbreviation (like WA or TX) is followed by another word in the middle of a sentence, the script automatically injects a grammatically correct trailing comma (turning *"Fife, WA experienced growth"* into *"Fife, WA, experienced growth"*).
+
+---
+
 ## Repository Structure
 
 ```
 ├── README.md                  # This documentation file
 ├── ai_summary_pipeline.py     # Main Python pipeline module & CLI entry point
 ├── Metric Topics (DRAFT).xlsx # Excel blueprint containing metric configurations (sheet AI Summary)
-├── ACS_Series_Polars.csv      # ACS timeseries source dataset
-├── components_of_change (4).csv # Population change components dataset
-├── population_pyramid.csv     # Population age/race breakdown dataset
+├── examples/                  # Example datasets (ACS, Components of Change, Pyramid, HAI, CPI, Mortgage)
 ├── archive/                   # Archived notebooks folder
-│   ├── AI Summary Testing.ipynb
-│   └── AI Summary Testing - Deterministic + LLM.ipynb
 └── .gitignore                 # Git ignore configurations
 ```
